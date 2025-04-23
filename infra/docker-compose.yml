@@ -1,0 +1,41 @@
+services:
+  fastapi:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    container_name: fastapi-app
+    env_file:
+      - ../.env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - neo4j
+      - minio
+    volumes:
+      - ../src:/app/src
+      - ../main.py:/app/main.py
+  neo4j:
+    image: neo4j:5.19
+    container_name: neo4j-db
+    environment:
+      - NEO4J_AUTH=neo4j/test2025*7
+    ports:
+      - "7687:7687"
+      - "7474:7474"
+    volumes:
+      - neo4j_data:/data
+  minio:
+    image: minio/minio:latest
+    container_name: minio-server
+    environment:
+      - MINIO_ROOT_USER=adminminio2025
+      - MINIO_ROOT_PASSWORD=SuperSecretKey2025
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+volumes:
+  neo4j_data:
+  minio_data:

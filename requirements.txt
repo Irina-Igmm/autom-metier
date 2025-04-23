@@ -1,0 +1,14 @@
+# Dépendances principales pour l'automatisation de scénarios métier
+fastapi
+uvicorn
+python-dotenv
+neo4j
+minio
+langchain
+llama-index
+# Pour les tests
+pytest
+# testcontainers-python
+# testcontainers-neo4j
+# Pour l'agent IA, adapter selon le provider (Groq, OpenAI, etc.)
+groq

@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Environnements virtuels
+.venv/
+venv/
+ENV/
+
+# Fichiers d'environnement
+.env
+.env.*
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# VSCode
+.vscode/
+
+# Fichiers temporaires
+*.log
+*.tmp
+*.bak
+
+# Dossiers de données
+/data/
+
+# Docker
+*.pid
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test containers
+/testcontainers/
