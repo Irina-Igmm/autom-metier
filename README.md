@@ -18,13 +18,16 @@ Automatiser des scénarios métier complexes (extraction de variables, générat
 - **Neo4j** : Base de données graphe pour modéliser les entités (Document, Variable, Scenario, Automatisation)
 - **MinIO** : Stockage objet pour documents et résultats
 - **Agent IA** : Orchestration des outils métier (extraction, génération, soumission web)
+- **Groq Cloud (LLM)** : Extraction de variables et génération de contenu via Llama-2 et Mixtral, prompts gérés avec PromptTemplate (LangChain)
+- **Playwright** : Automatisation réelle de la soumission de formulaires web
 
 ### Pipeline d'un scénario
 1. Création d'un scénario via POST `/scenarios/` (stockage dans Neo4j, liens vers documents/variables)
 2. Déclenchement d'un scénario via POST `/scenarios/{id}/run` (BackgroundTasks)
    - Téléchargement du document depuis MinIO
-   - Extraction/inscription de variables par l'agent IA
-   - Remplissage de template ou formulaire web
+   - Extraction/inscription de variables par l'agent IA (LLM Groq Cloud)
+   - Génération d'email ou remplissage de template (LLM ou Jinja2)
+   - Soumission automatisée de formulaire web (Playwright)
    - Génération et upload du résultat sur MinIO
    - Mise à jour du graphe Neo4j
 
@@ -37,7 +40,7 @@ Automatiser des scénarios métier complexes (extraction de variables, générat
    ```
 4. Lancer l'API :
    ```bash
-   uvicorn src.main:app --reload
+   uvicorn main:app --reload
    ```
 
 ## Lancement sur Google Colab
@@ -50,9 +53,11 @@ Automatiser des scénarios métier complexes (extraction de variables, générat
   ```
 - Utilisation de testcontainers pour Neo4j et simulation MinIO.
 
-## Choix du modèle IA
-- **Groq Cloud** (ou autre LLM) : choisi pour ses performances, coût, latence et confidentialité.
-- Orchestration via **Langchain** (multi-outils, RAG), indexation documentaire via **LlamaIndex** ou **Outline**.
+## Choix du modèle IA et outils
+- **Groq Cloud** : Llama-2-70B pour l'extraction de variables, Mixtral-8x7B pour la génération d'email (choix justifié pour performance, coût, latence, open-source).
+- **LangChain** : Orchestration des prompts et outils via PromptTemplate.
+- **Jinja2** : Remplissage de templates HTML localement.
+- **Playwright** : Soumission automatisée de formulaires web (remplace la simulation).
 
 ## Exemples de scénarios
 - Fin de contrat fournisseur : extraction de date, génération d'email, stockage du résultat

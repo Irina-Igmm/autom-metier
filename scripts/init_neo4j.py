@@ -8,8 +8,6 @@ Ce script:
 
 import sys
 import os
-import uuid
-from datetime import datetime, timedelta
 import random
 
 # Ajout du répertoire parent au PYTHONPATH

@@ -18,7 +18,8 @@ class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "")
     
     # Configuration Neo4j
-    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_URI_LOCAL = os.getenv("NEO4J_URI_LOCAL", "bolt://localhost:7687")
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
     
@@ -39,10 +40,21 @@ class Config:
     TIMEOUT = int(os.getenv("TIMEOUT", "30"))
     
     @classmethod
+    def get_neo4j_uri(cls):
+        """
+        Retourne l'URI Neo4j adaptée au contexte :
+        - Si RUN_LOCAL=1 dans l'env, utilise NEO4J_URI_LOCAL (localhost)
+        - Sinon, utilise NEO4J_URI (docker/service)
+        """
+        if os.getenv("RUN_LOCAL") == "1":
+            return cls.NEO4J_URI_LOCAL
+        return cls.NEO4J_URI
+
+    @classmethod
     def get_neo4j_config(cls):
         """Retourne la configuration Neo4j sous forme de dictionnaire."""
         return {
-            "uri": cls.NEO4J_URI,
+            "uri": cls.get_neo4j_uri(),
             "user": cls.NEO4J_USER,
             "password": cls.NEO4J_PASSWORD
         }
@@ -73,7 +85,7 @@ config = Config()  # Instance singleton pour import direct
 if __name__ == "__main__":
     # Affiche la configuration (sans secrets) pour débogage
     print(f"API: {config.API_HOST}:{config.API_PORT}")
-    print(f"Neo4j: {config.NEO4J_URI} (user: {config.NEO4J_USER})")
+    print(f"Neo4j: {config.get_neo4j_uri()} (user: {config.NEO4J_USER})")
     print(f"MinIO: {config.MINIO_ENDPOINT} (bucket: {config.MINIO_BUCKET})")
     print(f"LLM: {config.LLM_PROVIDER} ({config.LLM_MODEL})")
     print(f"LOG_LEVEL: {config.LOG_LEVEL}")

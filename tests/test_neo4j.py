@@ -7,14 +7,12 @@ import os
 import sys
 import time
 import pytest
+
 from testcontainers.neo4j import Neo4jContainer
 from typing import Generator
 
 # Ajout du répertoire principal au PYTHONPATH
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# Import du driver Neo4j
-from src.neo4j_driver import Neo4jDriver
 
 
 @pytest.fixture(scope="module")
@@ -39,30 +37,20 @@ def neo4j_container() -> Generator[Neo4jContainer, None, None]:
 
 
 @pytest.fixture(scope="module")
-def neo4j_driver(neo4j_container) -> Neo4jDriver:
+def neo4j_driver(neo4j_container):
     """
     Crée une instance du driver Neo4j connecté au conteneur de test.
-    
-    Args:
-        neo4j_container: Le conteneur Neo4j de test
-        
-    Returns:
-        Une instance connectée du driver Neo4j
     """
-    # Récupération des paramètres de connexion du conteneur
+    from src.neo4j_driver import Neo4jDriver  # Import ici pour éviter l'initialisation globale
     uri = neo4j_container.get_connection_url()
     user = "neo4j"
     password = "password"
-    
     driver = Neo4jDriver(
         uri=uri,
         user=user,
         password=password
     )
-    
-    # Créer les contraintes
     driver.create_constraints()
-    
     return driver
 
 

@@ -10,7 +10,7 @@ from src.tools.tools import (
     fill_html_template,
     submit_web_form
 )
-from src.config import settings
+from src.config import config as settings
 
 # Initialisation du LLM Groq Cloud
 llm = Groq(

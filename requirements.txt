@@ -2,13 +2,14 @@
 fastapi
 uvicorn
 python-dotenv
+python-multipart
 neo4j
 minio
 langchain
 llama-index
 # Pour les tests
 pytest
-# testcontainers-python
-# testcontainers-neo4j
 # Pour l'agent IA, adapter selon le provider (Groq, OpenAI, etc.)
 groq
+# Pour la gestion des fichiers et des données
+playwright

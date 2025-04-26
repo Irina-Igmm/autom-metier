@@ -3,10 +3,8 @@ Module pour la gestion des connexions et requêtes Neo4j.
 Fournit une interface pour interagir avec la base de données graphe.
 """
 
-import os
 import uuid
-from datetime import datetime
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any
 
 from neo4j import GraphDatabase, Driver
 from .config import config
