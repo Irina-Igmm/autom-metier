@@ -26,6 +26,11 @@ class Neo4jDriver:
         self.password = password or config.NEO4J_PASSWORD
         self.driver: Driver = None
         self.connect()
+        # Créer automatiquement les contraintes d'unicité si elles n'existent pas
+        try:
+            self.create_constraints()
+        except Exception as e:
+            print(f"Échec de la création des contraintes Neo4j: {e}")
 
     def connect(self) -> None:
         """Établit la connexion à Neo4j."""
@@ -158,7 +163,7 @@ class Neo4jDriver:
             id: $id,
             nom: $nom,
             type: $type_doc,
-            chemin: $chemin,
+            minio_key: $chemin,
             dateCreation: datetime(),
             statut: $statut
         })
@@ -360,13 +365,35 @@ class Neo4jDriver:
             )
             return result.single()["exists"]
 
+    def link_scenario_to_document(self, scenario_id: str, document_id: str, role: str = "entrée") -> None:
+        """
+        Crée une relation UTILISE entre un scénario et un document.
+        """
+        query = """
+        MATCH (s:Scenario {id: $scenario_id}), (d:Document {id: $document_id})
+        MERGE (s)-[:UTILISE {role: $role}]->(d)
+        """
+        with self.driver.session() as session:
+            session.run(query, scenario_id=scenario_id, document_id=document_id, role=role)
+
+    def link_scenario_to_variable(self, scenario_id: str, variable_id: str, role: str = "extraction") -> None:
+        """
+        Crée une relation UTILISE entre un scénario et une variable.
+        """
+        query = """
+        MATCH (s:Scenario {id: $scenario_id}), (v:Variable {id: $variable_id})
+        MERGE (s)-[:UTILISE {role: $role}]->(v)
+        """
+        with self.driver.session() as session:
+            session.run(query, scenario_id=scenario_id, variable_id=variable_id, role=role)
+
 
 # Utilisation comme singleton
 neo4j_driver = Neo4jDriver()
 
-# Exemple d'utilisation:
-if __name__ == "__main__":
-    # Ce code s'exécute uniquement si le module est exécuté directement
-    driver = Neo4jDriver()
-    driver.create_constraints()
-    driver.close()
+# # Exemple d'utilisation:
+# if __name__ == "__main__":
+#     # Ce code s'exécute uniquement si le module est exécuté directement
+#     driver = Neo4jDriver()
+#     driver.create_constraints()
+#     driver.close()
