@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from minio import Minio
 from minio.error import S3Error
@@ -20,10 +20,12 @@ def get_minio_manager():
     )
 
 minio_manager = get_minio_manager()
-driver = Neo4jDriver()
+
+def get_driver():
+    return Neo4jDriver()
 
 @app.post("/upload/")
-async def upload_file(file: UploadFile = File(...), type_doc: str = "autre", statut: str = "actif"):
+async def upload_file(file: UploadFile = File(...), type_doc: str = "autre", statut: str = "actif", driver: Neo4jDriver = Depends(get_driver)):
     try:
         content = await file.read()
         result = minio_manager.upload_file(content, file.filename, file.content_type)

@@ -1,3 +1,4 @@
+import io
 from minio import Minio
 from minio.error import S3Error
 
@@ -22,11 +23,16 @@ class MinioManager:
 
     def upload_file(self, file_obj, filename, content_type):
         try:
-            content = file_obj.read() if hasattr(file_obj, 'read') else file_obj
+            # Toujours obtenir un objet fichier pour MinIO
+            if hasattr(file_obj, 'read'):
+                content = file_obj.read()
+            else:
+                content = file_obj
+            # On passe un BytesIO à put_object
             self.client.put_object(
                 self.bucket,
                 filename,
-                data=content,
+                data=io.BytesIO(content),
                 length=len(content),
                 content_type=content_type
             )
