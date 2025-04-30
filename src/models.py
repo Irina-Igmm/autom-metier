@@ -83,12 +83,12 @@ class Step(BaseModel):
 
 
 class Scenario(BaseModel):
-    id: Optional[str]
+    id: Optional[str] = None
     nom: str
     description: Optional[str] = ""
     priorite: Priority = Priority.MOYENNE
     documents: List[str] = []
-    variables: List[str] = []
+    variables: List[Variable] = []  # Changé de List[str] à List[Variable]
     etapes: List[Step] = []
 
 

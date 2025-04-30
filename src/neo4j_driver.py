@@ -121,11 +121,18 @@ class Neo4jDriver(IDriver):
                 )
         logger.info("Contraintes Neo4j créées")
 
-    def _run_tx(self, cypher: str, params: Dict[str, Any] = None) -> Any:
+    def _run_tx(self, cypher: str, params: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """
+        Exécute la requête et retourne la liste complète des enregistrements
+        (chaque record.data()) avant de fermer la session.
+        """
         params = params or {}
         try:
             with self.driver.session() as session:
-                return session.run(cypher, **params)
+                result = session.run(cypher, **params)
+                # Bufferisation complète
+                records = [record.data() for record in result]
+                return records
         except Exception:
             logger.exception("Erreur lors de l'exécution de la requête Cypher")
             raise
@@ -158,14 +165,18 @@ class Neo4jDriver(IDriver):
             "minio_key: $key, dateCreation: datetime(), statut: $statut}) "
             "RETURN d.id AS id"
         )
-        record = self._run_tx(cypher, {
+        # _run_tx retourne désormais List[Dict[str,Any]]
+        records = self._run_tx(cypher, {
             "id": doc_id,
             "titre": doc_model.titre,
             "type": doc_model.type,
             "key": doc_model.minio_key,
             "statut": doc_model.statut.value,
-        }).single()
-        return record["id"]
+        })
+        if not records:
+            raise RuntimeError("Échec de la création du document")
+        # Premier enregistrement -> id
+        return records[0]["id"]
 
     def create_node(self, label: str, props: Dict[str, Any]) -> str:
         """Crée un nœud avec un label arbitraire et des propriétés données."""

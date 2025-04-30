@@ -8,9 +8,9 @@ import asyncio
 from collections import deque
 import threading
 from contextlib import asynccontextmanager
-from typing import Dict, List, Any, Optional, Generator, Union, Callable
+from typing import Dict, List, Any, Optional, Generator, Callable
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
@@ -22,145 +22,13 @@ from src.agent import run_agent_tool
 from src.models import Scenario, Automatisation, Document as DocumentModel
 from src.neo4j_driver import Neo4jDriver
 from scripts.minio_manager import MinioManager
+from src.task_queue import TaskQueue
 import logging
 
 from src.config import config
 
-# Task Queue for managing background tasks
-
-
-class TaskInfo:
-    def __init__(self, task_id: str, task_type: str, status: str = "queued",
-                 params: Dict[str, Any] = None):
-        self.id = task_id
-        self.type = task_type
-        self.status = status
-        self.params = params or {}
-        self.created_at = datetime.utcnow()
-        self.started_at: Optional[datetime] = None
-        self.completed_at: Optional[datetime] = None
-        self.error: Optional[str] = None
-        self.result: Optional[Any] = None
-        self.progress: int = 0
-        self.logs: List[Dict[str, Any]] = []
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "type": self.type,
-            "status": self.status,
-            "created_at": self.created_at.isoformat(),
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
-            "error": self.error,
-            "progress": self.progress,
-            "logs": self.logs
-        }
-
-    def log(self, message: str, level: str = "INFO"):
-        log_entry = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "level": level,
-            "message": message
-        }
-        self.logs.append(log_entry)
-
-    def start(self):
-        self.status = "running"
-        self.started_at = datetime.utcnow()
-        self.log(f"Task {self.id} started")
-
-    def complete(self, result: Any = None):
-        self.status = "completed"
-        self.completed_at = datetime.utcnow()
-        self.result = result
-        self.progress = 100
-        self.log(f"Task {self.id} completed")
-
-    def fail(self, error: str):
-        self.status = "failed"
-        self.completed_at = datetime.utcnow()
-        self.error = error
-        self.log(f"Task {self.id} failed: {error}", "ERROR")
-
-    def update_progress(self, progress: int):
-        self.progress = min(max(progress, 0), 100)
-        self.log(f"Progress updated: {self.progress}%")
-
-
-class TaskQueue:
-    def __init__(self, max_concurrent: int = 3):
-        self.tasks: Dict[str, TaskInfo] = {}
-        self.queue = deque()
-        self.max_concurrent = max_concurrent
-        self.running = 0
-        self.lock = threading.Lock()
-        self.worker_thread = threading.Thread(
-            target=self._worker_loop, daemon=True)
-        self.worker_thread.start()
-
-    def add_task(self, task_type: str, task_func: Callable,
-                 params: Dict[str, Any] = None) -> str:
-        task_id = str(uuid.uuid4())
-        task_info = TaskInfo(task_id, task_type, params=params)
-
-        with self.lock:
-            self.tasks[task_id] = task_info
-            self.queue.append((task_id, task_func, params or {}))
-
-        return task_id
-
-    def get_task_info(self, task_id: str) -> Optional[Dict[str, Any]]:
-        if task_id in self.tasks:
-            return self.tasks[task_id].to_dict()
-        return None
-
-    def get_all_tasks(self) -> List[Dict[str, Any]]:
-        return [task.to_dict() for task in self.tasks.values()]
-
-    def _worker_loop(self):
-        while True:
-            try:
-                if not self.queue or self.running >= self.max_concurrent:
-                    time.sleep(0.5)
-                    continue
-
-                with self.lock:
-                    if not self.queue:
-                        continue
-                    task_id, task_func, params = self.queue.popleft()
-                    self.running += 1
-
-                if task_id in self.tasks:
-                    self._execute_task(task_id, task_func, params)
-            except Exception as e:
-                logging.error(f"Task worker error: {str(e)}")
-                time.sleep(1)
-
-    def _execute_task(self, task_id: str, task_func: Callable, params: Dict[str, Any]):
-        task_info = self.tasks.get(task_id)
-        if not task_info:
-            with self.lock:
-                self.running -= 1
-            return
-
-        task_info.start()
-
-        try:
-            result = task_func(**params)
-            task_info.complete(result)
-        except Exception as e:
-            task_info.fail(str(e))
-            logging.error(f"Task {task_id} failed: {str(e)}", exc_info=True)
-        finally:
-            with self.lock:
-                self.running -= 1
-
-
-# Create TaskQueue instance
-task_queue = TaskQueue(max_concurrent=config.MAX_CONCURRENT_TASKS if hasattr(
-    config, 'MAX_CONCURRENT_TASKS') else 3)
-
+# Initialize TaskQueue instance
+task_queue = TaskQueue(max_concurrent=config.MAX_CONCURRENT_TASKS if hasattr(config, 'MAX_CONCURRENT_TASKS') else 3)
 
 # Setup templates for dashboard
 templates = Jinja2Templates(directory="templates")
@@ -175,282 +43,6 @@ async def lifespan(app: FastAPI):
 
     # Create static directory if it doesn't exist
     os.makedirs("static", exist_ok=True)
-
-    # Create dashboard.html if it doesn't exist
-    dashboard_path = os.path.join("templates", "dashboard.html")
-    if not os.path.exists(dashboard_path):
-        with open(dashboard_path, "w") as f:
-            f.write("""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Automation Dashboard</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/htmx.org@1.9.4"></script>
-    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        [x-cloak] { display: none !important; }
-    </style>
-</head>
-<body class="bg-gray-100">
-    <div class="min-h-screen" x-data="dashboard()">
-        <header class="bg-blue-600 text-white shadow">
-            <div class="container mx-auto px-4 py-4">
-                <h1 class="text-2xl font-bold">Automation Dashboard</h1>
-            </div>
-        </header>
-        
-        <main class="container mx-auto px-4 py-8">
-            <!-- Statistics -->
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
-                <div class="bg-white rounded shadow p-4">
-                    <h2 class="text-lg font-semibold mb-2">Active Tasks</h2>
-                    <p class="text-3xl" x-text="stats.active"></p>
-                </div>
-                <div class="bg-white rounded shadow p-4">
-                    <h2 class="text-lg font-semibold mb-2">Completed</h2>
-                    <p class="text-3xl" x-text="stats.completed"></p>
-                </div>
-                <div class="bg-white rounded shadow p-4">
-                    <h2 class="text-lg font-semibold mb-2">Failed</h2>
-                    <p class="text-3xl" x-text="stats.failed"></p>
-                </div>
-                <div class="bg-white rounded shadow p-4">
-                    <h2 class="text-lg font-semibold mb-2">Average Duration</h2>
-                    <p class="text-3xl" x-text="stats.avgDuration + 's'"></p>
-                </div>
-            </div>
-            
-            <!-- Task List -->
-            <div class="bg-white rounded shadow p-6 mb-6">
-                <h2 class="text-xl font-semibold mb-4">Recent Tasks</h2>
-                <div class="overflow-x-auto">
-                    <table class="min-w-full bg-white">
-                        <thead>
-                            <tr class="bg-gray-200 text-gray-700">
-                                <th class="py-2 px-4 text-left">ID</th>
-                                <th class="py-2 px-4 text-left">Type</th>
-                                <th class="py-2 px-4 text-left">Status</th>
-                                <th class="py-2 px-4 text-left">Created</th>
-                                <th class="py-2 px-4 text-left">Duration</th>
-                                <th class="py-2 px-4 text-left">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <template x-for="task in tasks" :key="task.id">
-                                <tr class="border-t border-gray-200">
-                                    <td class="py-2 px-4" x-text="task.id.substring(0, 8) + '...'"></td>
-                                    <td class="py-2 px-4" x-text="task.type"></td>
-                                    <td class="py-2 px-4">
-                                        <span 
-                                            :class="{
-                                                'bg-yellow-100 text-yellow-800': task.status === 'queued',
-                                                'bg-blue-100 text-blue-800': task.status === 'running',
-                                                'bg-green-100 text-green-800': task.status === 'completed',
-                                                'bg-red-100 text-red-800': task.status === 'failed'
-                                            }"
-                                            class="px-2 py-1 rounded text-sm"
-                                            x-text="task.status"
-                                        ></span>
-                                    </td>
-                                    <td class="py-2 px-4" x-text="formatDate(task.created_at)"></td>
-                                    <td class="py-2 px-4" x-text="calculateDuration(task)"></td>
-                                    <td class="py-2 px-4">
-                                        <button 
-                                            @click="viewTaskDetails(task)" 
-                                            class="text-blue-600 hover:text-blue-800"
-                                        >
-                                            Details
-                                        </button>
-                                    </td>
-                                </tr>
-                            </template>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            
-            <!-- Neo4j Graph Visualization -->
-            <div class="bg-white rounded shadow p-6 mb-6">
-                <h2 class="text-xl font-semibold mb-4">Graph Visualization</h2>
-                <div class="flex justify-center">
-                    <p class="text-gray-500">Graph visualization will be implemented here</p>
-                </div>
-            </div>
-        </main>
-        
-        <!-- Task Details Modal -->
-        <div 
-            x-show="selectedTask" 
-            x-cloak 
-            class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-        >
-            <div class="bg-white rounded shadow-lg w-full max-w-2xl max-h-[80vh] overflow-y-auto">
-                <div class="flex justify-between items-center border-b p-4">
-                    <h3 class="text-lg font-semibold">Task Details</h3>
-                    <button @click="selectedTask = null" class="text-gray-500 hover:text-gray-700">
-                        &times;
-                    </button>
-                </div>
-                <div class="p-4">
-                    <template x-if="selectedTask">
-                        <div>
-                            <div class="grid grid-cols-2 gap-4 mb-4">
-                                <div>
-                                    <p class="text-sm text-gray-600">ID</p>
-                                    <p class="font-medium" x-text="selectedTask.id"></p>
-                                </div>
-                                <div>
-                                    <p class="text-sm text-gray-600">Type</p>
-                                    <p class="font-medium" x-text="selectedTask.type"></p>
-                                </div>
-                                <div>
-                                    <p class="text-sm text-gray-600">Status</p>
-                                    <p class="font-medium" x-text="selectedTask.status"></p>
-                                </div>
-                                <div>
-                                    <p class="text-sm text-gray-600">Created</p>
-                                    <p class="font-medium" x-text="formatDate(selectedTask.created_at, true)"></p>
-                                </div>
-                                <div>
-                                    <p class="text-sm text-gray-600">Started</p>
-                                    <p class="font-medium" x-text="selectedTask.started_at ? formatDate(selectedTask.started_at, true) : 'N/A'"></p>
-                                </div>
-                                <div>
-                                    <p class="text-sm text-gray-600">Completed</p>
-                                    <p class="font-medium" x-text="selectedTask.completed_at ? formatDate(selectedTask.completed_at, true) : 'N/A'"></p>
-                                </div>
-                            </div>
-                            
-                            <!-- Progress -->
-                            <div class="mb-4" x-show="selectedTask.status === 'running'">
-                                <p class="text-sm text-gray-600 mb-1">Progress</p>
-                                <div class="w-full bg-gray-200 rounded-full h-2.5">
-                                    <div 
-                                        class="bg-blue-600 h-2.5 rounded-full" 
-                                        :style="'width: ' + selectedTask.progress + '%'"
-                                    ></div>
-                                </div>
-                            </div>
-                            
-                            <!-- Error -->
-                            <div class="mb-4" x-show="selectedTask.error">
-                                <p class="text-sm text-gray-600 mb-1">Error</p>
-                                <p class="text-red-600 bg-red-50 p-2 rounded" x-text="selectedTask.error"></p>
-                            </div>
-                            
-                            <!-- Logs -->
-                            <div class="mb-4">
-                                <p class="text-sm text-gray-600 mb-1">Logs</p>
-                                <div class="bg-gray-100 p-3 rounded font-mono text-xs h-40 overflow-y-auto">
-                                    <template x-for="(log, index) in selectedTask.logs" :key="index">
-                                        <div :class="{'text-red-600': log.level === 'ERROR'}">
-                                            <span x-text="formatDate(log.timestamp, true)"></span>
-                                            <span x-text="'['+log.level+']'"></span>
-                                            <span x-text="log.message"></span>
-                                        </div>
-                                    </template>
-                                </div>
-                            </div>
-                        </div>
-                    </template>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        function dashboard() {
-            return {
-                tasks: [],
-                stats: {
-                    active: 0,
-                    completed: 0,
-                    failed: 0,
-                    avgDuration: 0
-                },
-                selectedTask: null,
-                
-                init() {
-                    this.loadTasks();
-                    setInterval(() => this.loadTasks(), 5000);
-                },
-                
-                async loadTasks() {
-                    try {
-                        const response = await fetch('/api/tasks');
-                        if (response.ok) {
-                            this.tasks = await response.json();
-                            this.updateStats();
-                        }
-                    } catch (error) {
-                        console.error('Error fetching tasks:', error);
-                    }
-                },
-                
-                updateStats() {
-                    const active = this.tasks.filter(t => t.status === 'queued' || t.status === 'running').length;
-                    const completed = this.tasks.filter(t => t.status === 'completed').length;
-                    const failed = this.tasks.filter(t => t.status === 'failed').length;
-                    
-                    let totalDuration = 0;
-                    let completedCount = 0;
-                    
-                    this.tasks.forEach(task => {
-                        if (task.status === 'completed' && task.started_at && task.completed_at) {
-                            const start = new Date(task.started_at);
-                            const end = new Date(task.completed_at);
-                            totalDuration += (end - start) / 1000;
-                            completedCount++;
-                        }
-                    });
-                    
-                    this.stats = {
-                        active,
-                        completed,
-                        failed,
-                        avgDuration: completedCount > 0 ? (totalDuration / completedCount).toFixed(1) : 0
-                    };
-                },
-                
-                formatDate(dateStr, showTime = false) {
-                    if (!dateStr) return 'N/A';
-                    const date = new Date(dateStr);
-                    if (showTime) {
-                        return date.toLocaleString();
-                    }
-                    return date.toLocaleDateString();
-                },
-                
-                calculateDuration(task) {
-                    if (!task.started_at) return 'N/A';
-                    
-                    const start = new Date(task.started_at);
-                    const end = task.completed_at ? new Date(task.completed_at) : new Date();
-                    
-                    const seconds = Math.floor((end - start) / 1000);
-                    
-                    if (seconds < 60) {
-                        return seconds + 's';
-                    }
-                    
-                    const minutes = Math.floor(seconds / 60);
-                    const remainingSeconds = seconds % 60;
-                    return minutes + 'm ' + remainingSeconds + 's';
-                },
-                
-                viewTaskDetails(task) {
-                    this.selectedTask = task;
-                }
-            }
-        }
-    </script>
-</body>
-</html>
-            """)
 
     yield
 
@@ -532,90 +124,25 @@ def create_scenario(
     scenario: Scenario,
     driver: Neo4jDriver = Depends(get_driver),
 ):
-    try:
-        scenario_id = driver.create_scenario(
-            nom=scenario.nom,
-            description=scenario.description,
-            priorite=scenario.priorite,
-            document_ids=scenario.documents,
-            variables=[
-                {"key": v.key, "data_type": v.data_type.value}
-                for v in scenario.variables
-            ]
-        )
-        scenario_id = driver.create_scenario(
-            nom=scenario.nom,
-            description=scenario.description,
-            priorite=scenario.priorite.value,
-            document_ids=scenario.documents,
-            variables=[{"key": v.key, "data_type": v.data_type.value}
-                       for v in scenario.variables],
-            etapes=[step.dict() for step in scenario.etapes]
-        )
-        return {"scenario_id": scenario_id}
-    except Exception as e:
-        logger.error(f"Erreur création scénario: {e}")
-        raise HTTPException(status_code=500, detail="Création échouée")
-
-
-@app.post("/scenarios/{scenario_id}/run", dependencies=[Depends(verify_token)])
-async def run_scenario(
-    scenario_id: str,
-    background_tasks: BackgroundTasks,
-    driver: Neo4jDriver = Depends(get_driver),
-    minio_manager: MinioManager = Depends(get_minio_manager),
-    sync: bool = False,
-):
-    # Créer une nouvelle automatisation dans Neo4j et obtenir son ID
-    automation_id = driver.start_automation(scenario_id, agent_config={})
-
-    def execute(automation_id=automation_id):
-        import time
-        import json
-        start = time.time()
-        try:
-            data = driver.get_scenario_with_relations(scenario_id)
-            if not data:
-                raise HTTPException(
-                    status_code=404, detail="Scénario non trouvé")
-            # Récupérer les étapes et trier
-            etapes = data['scenario'].get('etapes', [])
-            etapes = sorted(etapes, key=lambda e: e['ordre'])
-            results = []
-            # Exécuter les steps métiers
-            for step in etapes:
-                tool = step['outil']
-                params = step.get('params', {})
-                try:
-                    out = run_agent_tool(tool, **params)
-                except Exception as ex:
-                    out = {'error': str(ex)}
-                results.append(
-                    {'outil': tool, 'params': params, 'result': out})
-            # Mettre à jour le statut success
-            duration = int((time.time() - start) * 1000)
-            driver.update_automation_status(
-                automation_id=automation_id,
-                statut='terminé',
-                resultat=json.dumps(results),
-                duree_ms=duration
-            )
-            return {'status': 'terminé', 'results': results}
-        except Exception as e:
-            # En cas d'erreur, mettre à jour le statut échoué
-            duration = int((time.time() - start) * 1000)
-            driver.update_automation_status(
-                automation_id=automation_id,
-                statut='échoué',
-                resultat=str(e),
-                duree_ms=duration
-            )
-            return {'status': 'échoué', 'error': str(e)}
-
-    if sync:
-        return execute()
-    background_tasks.add_task(execute)
-    return {'automatisation_id': automation_id, 'status': 'queued'}
+    # Créer des structures pour les variables et étapes attendues par Neo4j
+    variables_dicts = []
+    if scenario.variables:
+        variables_dicts = [
+            {"key": v.key, "data_type": v.data_type.value}
+            for v in scenario.variables
+        ]
+    etapes_dicts = []
+    if scenario.etapes:
+        etapes_dicts = [step.dict() for step in scenario.etapes]
+    scenario_id = driver.create_scenario(
+        nom=scenario.nom,
+        description=scenario.description,
+        priorite=scenario.priorite.value,
+        document_ids=scenario.documents,
+        variables=variables_dicts,
+        etapes=etapes_dicts
+    )
+    return {"scenario_id": scenario_id}
 
 
 # Dashboard endpoint - accessible without authentication
@@ -1071,44 +598,31 @@ def create_variable(
     var: VariableCreate,
     driver: Neo4jDriver = Depends(get_driver),
 ):
-    try:
-        variable_id = driver.link_variable_to_document(
-            document_id=var.document_id,
-            variable_nom=var.key,
-            variable_valeur=var.value,
-            variable_type=var.data_type,
-        )
-        return {"variable_id": variable_id}
-    except Exception as e:
-        logger.error(f"Erreur création variable: {e}")
-        raise HTTPException(status_code=500, detail="Création échouée")
+    variable_id = driver.link_variable_to_document(
+        document_id=var.document_id,
+        variable_nom=var.key,
+        variable_valeur=var.value,
+        variable_type=var.data_type,
+    )
+    return {"variable_id": variable_id}
 
 
 @app.get("/variables/{variable_id}", dependencies=[Depends(verify_token)])
 def get_variable(variable_id: str, driver: Neo4jDriver = Depends(get_driver)):
-    try:
-        query = "MATCH (v:Variable {id: $id}) RETURN v"
-        with driver.driver.session() as session:
-            record = session.run(query, id=variable_id).single()
-            if not record:
-                raise HTTPException(
-                    status_code=404, detail="Variable non trouvée")
-            return dict(record["v"])
-    except Exception as e:
-        logger.error(f"Erreur récupération variable: {e}")
-        raise HTTPException(status_code=500, detail="Erreur interne")
+    query = "MATCH (v:Variable {id: $id}) RETURN v"
+    with driver.driver.session() as session:
+        record = session.run(query, id=variable_id).single()
+        if not record:
+            raise HTTPException(
+                status_code=404, detail="Variable non trouvée")
+        return dict(record["v"])
 
 
 @app.delete("/variables/{variable_id}", dependencies=[Depends(verify_token)])
 def delete_variable(variable_id: str, driver: Neo4jDriver = Depends(get_driver)):
-    try:
-        with driver.driver.session() as session:
-            session.run(
-                "MATCH (v:Variable {id: $id}) DETACH DELETE v", id=variable_id)
-        return {"status": "deleted"}
-    except Exception as e:
-        logger.error(f"Erreur suppression variable: {e}")
-        raise HTTPException(status_code=500, detail="Erreur interne")
+    with driver.driver.session() as session:
+        session.run("MATCH (v:Variable {id: $id}) DETACH DELETE v", id=variable_id)
+    return {"status": "deleted"}
 
 
 @app.post("/automatisations/", dependencies=[Depends(verify_token)])
@@ -1116,43 +630,29 @@ def create_automatisation(
     automatisation: Automatisation,
     driver: Neo4jDriver = Depends(get_driver),
 ):
-    try:
-        automatisation_id = driver.start_automation(
-            scenario_id=automatisation.scenario_id,
-            agent_config=automatisation.agent_config
-        )
-        return {"automatisation_id": automatisation_id}
-    except Exception as e:
-        logger.error(f"Erreur création automatisation: {e}")
-        raise HTTPException(status_code=500, detail="Création échouée")
+    automatisation_id = driver.start_automation(
+        scenario_id=automatisation.scenario_id,
+        agent_config=automatisation.agent_config
+    )
+    return {"automatisation_id": automatisation_id}
 
 
 @app.get("/automatisations/{automatisation_id}", dependencies=[Depends(verify_token)])
 def get_automatisation(automatisation_id: str, driver: Neo4jDriver = Depends(get_driver)):
-    try:
-        with driver.driver.session() as session:
-            record = session.run(
-                "MATCH (a:Automatisation {id: $id}) RETURN a", id=automatisation_id
-            ).single()
-        if not record:
-            raise HTTPException(
-                status_code=404, detail="Automatisation non trouvée")
-        return dict(record["a"])
-    except Exception as e:
-        logger.error(f"Erreur récupération automatisation: {e}")
-        raise HTTPException(status_code=500, detail="Erreur interne")
+    with driver.driver.session() as session:
+        record = session.run(
+            "MATCH (a:Automatisation {id: $id}) RETURN a", id=automatisation_id
+        ).single()
+    if not record:
+        raise HTTPException(status_code=404, detail="Automatisation non trouvée")
+    return dict(record["a"])
 
 
 @app.delete("/automatisations/{automatisation_id}", dependencies=[Depends(verify_token)])
 def delete_automatisation(automatisation_id: str, driver: Neo4jDriver = Depends(get_driver)):
-    try:
-        with driver.driver.session() as session:
-            session.run(
-                "MATCH (a:Automatisation {id: $id}) DETACH DELETE a", id=automatisation_id)
-        return {"status": "deleted"}
-    except Exception as e:
-        logger.error(f"Erreur suppression automatisation: {e}")
-        raise HTTPException(status_code=500, detail="Erreur interne")
+    with driver.driver.session() as session:
+        session.run("MATCH (a:Automatisation {id: $id}) DETACH DELETE a", id=automatisation_id)
+    return {"status": "deleted"}
 
 
 @app.post("/documents/", dependencies=[Depends(verify_token)])
@@ -1161,17 +661,13 @@ def create_document(
     driver: Neo4jDriver = Depends(get_driver)
 ):
     """Créer un document dans Neo4j sans upload MinIO"""
-    try:
-        doc_id = driver.create_document(
-            titre=doc.titre,
-            type=doc.type,
-            minio_key=doc.minio_key,
-            statut=doc.statut.value
-        )
-        return {"document_id": doc_id}
-    except Exception as e:
-        logger.error(f"Erreur création document: {e}")
-        raise HTTPException(status_code=500, detail="Création échouée")
+    doc_id = driver.create_document(
+        titre=doc.titre,
+        type=doc.type,
+        minio_key=doc.minio_key,
+        statut=doc.statut.value
+    )
+    return {"document_id": doc_id}
 
 
 @app.get("/documents/{document_id}", dependencies=[Depends(verify_token)])
@@ -1186,12 +682,8 @@ def get_document(document_id: str, driver: Neo4jDriver = Depends(get_driver)):
 @app.delete("/documents/{document_id}", dependencies=[Depends(verify_token)])
 def delete_document(document_id: str, driver: Neo4jDriver = Depends(get_driver)):
     """Supprimer un document et ses relations"""
-    try:
-        driver.delete_entity("Document", document_id)
-        return {"status": "deleted"}
-    except Exception as e:
-        logger.error(f"Erreur suppression document: {e}")
-        raise HTTPException(status_code=500, detail="Erreur interne")
+    driver.delete_entity("Document", document_id)
+    return {"status": "deleted"}
 
 
 @app.exception_handler(Exception)
