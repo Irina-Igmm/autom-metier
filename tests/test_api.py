@@ -110,3 +110,83 @@ def test_agent_end_to_end_invoice(client_app, auth_headers, tmp_path):
         assert "scenario_id" in data["agent_result"] or "agent_result" in data
     else:
         assert False, "Aucun résultat structuré retourné par l'agent IA"
+
+
+def test_create_variable(client_app, auth_headers):
+    payload = {
+        "id": None,  # à remplacer par un document_id valide si besoin de lien
+        "key": "test_key",
+        "data_type": "string",
+        "value": "valeur_test"
+    }
+    response = client_app.post("/variables/", json=payload, headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert "variable_id" in data
+    assert isinstance(data["variable_id"], str)
+
+def test_get_and_delete_variable(client_app, auth_headers):
+    # Création d'une variable
+    payload = {
+        "id": None,
+        "key": "to_delete",
+        "data_type": "string",
+        "value": "delete_me"
+    }
+    create_resp = client_app.post("/variables/", json=payload, headers=auth_headers)
+    var_id = create_resp.json()["variable_id"]
+    # Lecture
+    get_resp = client_app.get(f"/variables/{var_id}", headers=auth_headers)
+    assert get_resp.status_code == 200
+    assert get_resp.json()["key"] == "to_delete"
+    # Suppression
+    del_resp = client_app.delete(f"/variables/{var_id}", headers=auth_headers)
+    assert del_resp.status_code == 200
+    assert del_resp.json()["status"] == "deleted"
+
+def test_create_automatisation(client_app, auth_headers):
+    # Créer un scénario pour lier l'automatisation
+    scenario_payload = {
+        "nom": "Scénario pour auto",
+        "description": "desc auto",
+        "priorite": "moyenne",
+        "documents": [],
+        "variables": []
+    }
+    scenario_resp = client_app.post("/scenarios/", json=scenario_payload, headers=auth_headers)
+    scenario_id = scenario_resp.json()["scenario_id"]
+    auto_payload = {
+        "scenario_id": scenario_id,
+        "agent_config": {"model": "test"}
+    }
+    response = client_app.post("/automatisations/", json=auto_payload, headers=auth_headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert "automatisation_id" in data
+    assert isinstance(data["automatisation_id"], str)
+
+def test_get_and_delete_automatisation(client_app, auth_headers):
+    # Créer un scénario et une automatisation
+    scenario_payload = {
+        "nom": "Scénario pour auto2",
+        "description": "desc auto2",
+        "priorite": "moyenne",
+        "documents": [],
+        "variables": []
+    }
+    scenario_resp = client_app.post("/scenarios/", json=scenario_payload, headers=auth_headers)
+    scenario_id = scenario_resp.json()["scenario_id"]
+    auto_payload = {
+        "scenario_id": scenario_id,
+        "agent_config": {"model": "test2"}
+    }
+    create_resp = client_app.post("/automatisations/", json=auto_payload, headers=auth_headers)
+    auto_id = create_resp.json()["automatisation_id"]
+    # Lecture
+    get_resp = client_app.get(f"/automatisations/{auto_id}", headers=auth_headers)
+    assert get_resp.status_code == 200
+    assert get_resp.json()["agent_config"]["model"] == "test2"
+    # Suppression
+    del_resp = client_app.delete(f"/automatisations/{auto_id}", headers=auth_headers)
+    assert del_resp.status_code == 200
+    assert del_resp.json()["status"] == "deleted"

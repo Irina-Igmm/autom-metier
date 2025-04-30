@@ -1,140 +1,117 @@
+# main.py
+import os
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, UploadFile, File
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer
 from fastapi.responses import StreamingResponse
-from datetime import datetime
-from src.models import Scenario
-from src.neo4j_driver import neo4j_driver, Neo4jDriver
-from scripts.minio_manager import MinioManager
-from src.config import config
-from src.agent import run_agent_tool
-import logging
-import time
-from typing import List, Optional
 from jose import JWTError, jwt
-from datetime import timedelta
+from src.models import Scenario, Variable, Automatisation
+from src.neo4j_driver import Neo4jDriver
+from scripts.minio_manager import MinioManager
+import logging
 
+from src.config import config
+
+# 1. Chargement des variables d’environnement
+from dotenv import load_dotenv
+load_dotenv()  # lit .env à la racine
+
+# 2. Initialisation
 app = FastAPI()
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=config.LOG_LEVEL)
 
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/generate-token")
 
-def get_driver():
+
+def get_driver() -> Neo4jDriver:
+    neo4j_driver = Neo4jDriver()
     return neo4j_driver
 
 
-def get_minio_manager():
-    minio_conf = config.get_minio_config()
+def get_minio_manager() -> MinioManager:
     return MinioManager(
-        minio_conf["endpoint"],
-        minio_conf["access_key"],
-        minio_conf["secret_key"],
-        minio_conf["bucket"],
-        secure=minio_conf["secure"],
+        endpoint=config.MINIO_ENDPOINT,
+        access_key=config.MINIO_ACCESS_KEY,
+        secret_key=config.MINIO_SECRET_KEY,
+        bucket=config.MINIO_BUCKET,
+        secure=config.MINIO_SECURE,
     )
 
+@app.post("/generate-token/", summary="Génère un JWT valide 1 h")
+def generate_token():
+    expire = datetime.utcnow() + timedelta(minutes=config.ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": config.VAR_SYS,
+        "exp": expire
+    }
+    token = jwt.encode(
+        payload, config.VAR_SYS, algorithm="HS256")
+    return {"access_token": token, "token_type": "bearer", "expires_at": expire.isoformat()}
 
-# Security setup
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
-
-SECRET_KEY = config.SECRET_KEY or "changeme"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-
-def authenticate_user(username: str, password: str):
-    # TODO: replace with real authentication logic
-    if username == "testuser" and password == "testpassword":
-        return {"username": username}
-    return None
+# 4. Dépendance pour valider le token
 
 
-@app.post("/token")
-def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = authenticate_user(form_data.username, form_data.password)
-    if not user:
-        raise HTTPException(status_code=400, detail="Incorrect username or password")
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode = {"sub": user["username"], "exp": expire}
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return {"access_token": encoded_jwt, "token_type": "bearer"}
-
-
-def get_current_user(token: str = Depends(oauth2_scheme)):
+def verify_token(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
         status_code=401,
-        detail="Could not validate credentials",
+        detail="Token invalide ou expiré",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
+        payload = jwt.decode(
+            token, config.VAR_SYS, algorithms=["HS256"])
+        subject: str = payload.get("sub")
+        if subject != config.VAR_SYS:
             raise credentials_exception
-        return {"username": username}
     except JWTError:
         raise credentials_exception
+    return subject
+
+# 5. Endpoints protégés
 
 
-@app.post("/scenarios/")
+@app.post("/scenarios/", dependencies=[Depends(verify_token)])
 def create_scenario(
     scenario: Scenario,
     driver: Neo4jDriver = Depends(get_driver),
-    current_user: dict = Depends(get_current_user),
 ):
-    # endpoint protected by token
     try:
-        # Création du nœud Scenario dans Neo4j en utilisant les champs Pydantic
         scenario_id = driver.create_scenario(
             nom=scenario.nom,
             description=scenario.description,
             priorite=scenario.priorite,
             document_ids=scenario.documents,
-            variables=[{"nom": v, "type": ""} for v in scenario.variables],
+            variables=[{"nom": v.key, "type": v.data_type}
+                       for v in scenario.variables],
         )
-        # Création des liens Scenario--UTILISE-->Document (les variables sont créées et liées par create_scenario)
         for doc_id in scenario.documents:
             driver.link_scenario_to_document(scenario_id, doc_id)
         return {"scenario_id": scenario_id}
     except Exception as e:
-        logger.error(f"Erreur lors de la création du scénario: {e}")
-        raise HTTPException(status_code=500, detail="Impossible de créer le scénario")
+        logger.error(f"Erreur création scénario: {e}")
+        raise HTTPException(status_code=500, detail="Création échouée")
 
 
-# ...existing code...
-
-
-@app.post("/scenarios/{scenario_id}/run")
+@app.post("/scenarios/{scenario_id}/run", dependencies=[Depends(verify_token)])
 async def run_scenario(
     scenario_id: str,
     background_tasks: BackgroundTasks,
     driver: Neo4jDriver = Depends(get_driver),
     minio_manager: MinioManager = Depends(get_minio_manager),
     sync: bool = False,
-    current_user: dict = Depends(get_current_user),
 ):
-    """
-    Exécution automatisée d'un scénario pilotée par l'agent IA :
-    1. Récupère le scénario et le(s) document(s) associé(s) depuis Neo4j/MinIO
-    2. Demande à l'agent IA de générer dynamiquement le plan d'action (outils, ordre, paramètres)
-    3. Exécute chaque tâche via l'agent (extraction, génération, remplissage, etc.)
-    4. Met à jour Neo4j et MinIO à chaque étape
-    """
-
     def execute():
         try:
-            # 1. Récupérer le scénario et les documents associés
             scenario = driver.get_scenario_with_relations(scenario_id)
             if not scenario:
-                logger.warning(f"Scénario {scenario_id} non trouvé")
-                raise HTTPException(status_code=404, detail="Scenario not found")
-            documents = scenario["documents"]
+                raise HTTPException(
+                    status_code=404, detail="Scénario non trouvé")
             results = []
-            for doc in documents:
-                minio_key = doc.get("minio_key") or doc.get("chemin")
-                file_bytes = minio_manager.download_file(minio_key).read()
-                # 2. Appel à l'agent IA pour orchestrer tout le flux
+            for doc in scenario["documents"]:
+                file_bytes = minio_manager.download_file(
+                    doc["minio_key"]).read()
                 from src.agent import create_dynamic_scenario
-
                 agent_result = create_dynamic_scenario(
                     document_content=file_bytes,
                     filename=doc["nom"],
@@ -142,33 +119,121 @@ async def run_scenario(
                     driver=driver,
                 )
                 results.append(agent_result)
-            # 3. Mettre à jour le statut d'automatisation dans Neo4j
-            # (optionnel: driver.update_automation_status(...))
             return {"status": "terminé", "results": results}
         except Exception as e:
-            logger.error(f"Erreur lors de l'exécution du scénario {scenario_id}: {e}")
+            logger.error(f"Erreur exécution scénario {scenario_id}: {e}")
             return {"status": "échoué", "error": str(e)}
 
     if sync:
         return execute()
-    else:
-        background_tasks.add_task(execute)
-        return {"status": "Automatisation lancée"}
+    background_tasks.add_task(execute)
+    return {"status": "Automatisation lancée"}
 
 
-@app.post("/upload/", dependencies=[Depends(get_current_user)])
+@app.post("/upload/", dependencies=[Depends(verify_token)])
 async def upload_file(
     minio_manager: MinioManager = Depends(get_minio_manager),
     file: UploadFile = File(...),
 ):
     content = await file.read()
-    result = minio_manager.upload_file(content, file.filename, file.content_type)
+    result = minio_manager.upload_file(
+        content, file.filename, file.content_type)
     return {"filename": file.filename, "bucket": result["bucket"]}
 
 
-@app.get("/download/{filename}", dependencies=[Depends(get_current_user)])
+@app.get("/download/{filename}", dependencies=[Depends(verify_token)])
 def download_file(
-    filename: str, minio_manager: MinioManager = Depends(get_minio_manager)
+    filename: str,
+    minio_manager: MinioManager = Depends(get_minio_manager)
 ):
     file_obj = minio_manager.download_file(filename)
     return StreamingResponse(file_obj, media_type="application/octet-stream")
+
+
+@app.post("/variables/", dependencies=[Depends(verify_token)])
+def create_variable(
+    variable: Variable,
+    driver: Neo4jDriver = Depends(get_driver),
+):
+    try:
+        variable_id = driver.link_variable_to_document(
+            document_id=variable.id,
+            variable_nom=variable.key,
+            variable_valeur=variable.value,
+            variable_type=variable.data_type
+        )
+        return {"variable_id": variable_id}
+    except Exception as e:
+        logger.error(f"Erreur création variable: {e}")
+        raise HTTPException(status_code=500, detail="Création échouée")
+
+
+@app.get("/variables/{variable_id}", dependencies=[Depends(verify_token)])
+def get_variable(variable_id: str, driver: Neo4jDriver = Depends(get_driver)):
+    try:
+        query = "MATCH (v:Variable {id: $id}) RETURN v"
+        with driver.driver.session() as session:
+            record = session.run(query, id=variable_id).single()
+            if not record:
+                raise HTTPException(
+                    status_code=404, detail="Variable non trouvée")
+            return dict(record["v"])
+    except Exception as e:
+        logger.error(f"Erreur récupération variable: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne")
+
+
+@app.delete("/variables/{variable_id}", dependencies=[Depends(verify_token)])
+def delete_variable(variable_id: str, driver: Neo4jDriver = Depends(get_driver)):
+    try:
+        with driver.driver.session() as session:
+            session.run(
+                "MATCH (v:Variable {id: $id}) DETACH DELETE v", id=variable_id)
+        return {"status": "deleted"}
+    except Exception as e:
+        logger.error(f"Erreur suppression variable: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne")
+
+
+@app.post("/automatisations/", dependencies=[Depends(verify_token)])
+def create_automatisation(
+    automatisation: Automatisation,
+    driver: Neo4jDriver = Depends(get_driver),
+):
+    try:
+        automatisation_id = driver.start_automation(
+            scenario_id=automatisation.scenario_id,
+            agent_config=automatisation.agent_config
+        )
+        return {"automatisation_id": automatisation_id}
+    except Exception as e:
+        logger.error(f"Erreur création automatisation: {e}")
+        raise HTTPException(status_code=500, detail="Création échouée")
+
+
+@app.get("/automatisations/{automatisation_id}", dependencies=[Depends(verify_token)])
+def get_automatisation(automatisation_id: str, driver: Neo4jDriver = Depends(get_driver)):
+    try:
+        with driver.driver.session() as session:
+            record = session.run(
+                "MATCH (a:Automatisation {id: $id}) RETURN a", id=automatisation_id
+            ).single()
+        if not record:
+            raise HTTPException(
+                status_code=404, detail="Automatisation non trouvée")
+        return dict(record["a"])
+    except Exception as e:
+        logger.error(f"Erreur récupération automatisation: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne")
+
+
+@app.delete("/automatisations/{automatisation_id}", dependencies=[Depends(verify_token)])
+def delete_automatisation(automatisation_id: str, driver: Neo4jDriver = Depends(get_driver)):
+    try:
+        with driver.driver.session() as session:
+            session.run(
+                "MATCH (a:Automatisation {id: $id}) DETACH DELETE a", id=automatisation_id)
+        return {"status": "deleted"}
+    except Exception as e:
+        logger.error(f"Erreur suppression automatisation: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne")

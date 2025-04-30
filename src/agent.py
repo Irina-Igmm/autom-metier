@@ -7,13 +7,16 @@ import logging
 from langchain.agents import initialize_agent, Tool, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
-from langchain.chains import LLMChain
 from src.tools.tools import (
     extract_variables_from_document,
     generate_email,
     fill_html_template,
     submit_web_form,
 )
+from src.tools.email_tools import EmailTool
+from src.tools.minio_tools import MinIOTool
+from src.tools.neo4j_tools import Neo4jTool
+from src.tools.pdf_generator_tools import PDFGeneratorTool
 from src.config import Config as settings
 
 # Initialisation du client Groq Cloud
@@ -93,7 +96,8 @@ Réponds sous forme de liste d'actions en JSON. Par exemple :
   "explanation": "Explication du plan d'action"
 } """
 
-action_planning_prompt = ChatPromptTemplate.from_template(ACTION_PLANNING_TEMPLATE)
+action_planning_prompt = ChatPromptTemplate.from_template(
+    ACTION_PLANNING_TEMPLATE)
 # action_planner = LLMChain(llm=client, prompt=action_planning_prompt)
 action_planner = action_planning_prompt | client
 
@@ -138,7 +142,8 @@ def create_dynamic_scenario(
         minio_conf["bucket"],
         secure=minio_conf["secure"],
     )
-    minio_manager.upload_file(document_content, filename, "application/octet-stream")
+    minio_manager.upload_file(
+        document_content, filename, "application/octet-stream")
     doc_id = driver.create_document(
         nom=filename,
         type_doc="automatique",

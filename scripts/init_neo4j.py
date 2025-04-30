@@ -6,15 +6,15 @@ Ce script:
 2. Insère des données de test (scénarios, documents, variables)
 """
 
+from src.config import config
+from src.neo4j_driver import Neo4jDriver
 import sys
 import os
 import random
 
 # Ajout du répertoire parent au PYTHONPATH
-sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ""))
-
-from src.neo4j_driver import Neo4jDriver
-from src.config import config
+sys.path.append(os.path.join(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))), ""))
 
 
 def create_test_data(driver: Neo4jDriver):
@@ -23,7 +23,7 @@ def create_test_data(driver: Neo4jDriver):
     Inclut: 2 scénarios, 5 documents, 10 variables.
     """
     print("Création des données de test...")
-    
+
     # Création de documents
     documents = [
         {
@@ -52,7 +52,7 @@ def create_test_data(driver: Neo4jDriver):
             "chemin": "devis/projet_xyz_2025.pdf"
         }
     ]
-    
+
     document_ids = []
     for doc in documents:
         doc_id = driver.create_document(
@@ -62,42 +62,52 @@ def create_test_data(driver: Neo4jDriver):
         )
         document_ids.append(doc_id)
         print(f"Document créé: {doc['nom']} (ID: {doc_id})")
-    
-    # Création de variables liées aux documents
+
+    # Création de variables liées aux documents (utilisation de key, data_type, value)
     variables = [
-        {"document_index": 0, "nom": "numeroFacture", "valeur": "FACT-2025-123", "type": "string"},
-        {"document_index": 0, "nom": "fournisseur", "valeur": "Fournisseur A", "type": "string"},
-        {"document_index": 0, "nom": "montantHT", "valeur": 1500.50, "type": "number"},
-        {"document_index": 0, "nom": "dateEmission", "valeur": "2025-04-15", "type": "date"},
-        
-        {"document_index": 1, "nom": "dateFinContrat", "valeur": "2026-12-31", "type": "date"},
-        {"document_index": 1, "nom": "prestataire", "valeur": "Maintenance Pro", "type": "string"},
-        
-        {"document_index": 2, "nom": "client", "valeur": "Client XYZ", "type": "string"},
-        {"document_index": 2, "nom": "montantDu", "valeur": 2750.00, "type": "number"},
-        
-        {"document_index": 3, "nom": "nomProduit", "valeur": "Produit ABC", "type": "string"},
-        {"document_index": 3, "nom": "categorie", "valeur": "Électronique", "type": "string"}
+        {"document_index": 0, "key": "numeroFacture",
+            "value": "FACT-2025-123", "data_type": "string"},
+        {"document_index": 0, "key": "fournisseur",
+            "value": "Fournisseur A", "data_type": "string"},
+        {"document_index": 0, "key": "montantHT",
+            "value": 1500.50, "data_type": "number"},
+        {"document_index": 0, "key": "dateEmission",
+            "value": "2025-04-15", "data_type": "date"},
+
+        {"document_index": 1, "key": "dateFinContrat",
+            "value": "2026-12-31", "data_type": "date"},
+        {"document_index": 1, "key": "prestataire",
+            "value": "Maintenance Pro", "data_type": "string"},
+
+        {"document_index": 2, "key": "client",
+            "value": "Client XYZ", "data_type": "string"},
+        {"document_index": 2, "key": "montantDu",
+            "value": 2750.00, "data_type": "number"},
+
+        {"document_index": 3, "key": "nomProduit",
+            "value": "Produit ABC", "data_type": "string"},
+        {"document_index": 3, "key": "categorie",
+            "value": "Électronique", "data_type": "string"}
     ]
-    
+
     for var in variables:
         confiance = round(random.uniform(0.85, 0.99), 2)
         var_id = driver.link_variable_to_document(
             document_id=document_ids[var["document_index"]],
-            variable_nom=var["nom"],
-            variable_valeur=var["valeur"],
-            variable_type=var["type"],
+            variable_nom=var["key"],
+            variable_valeur=var["value"],
+            variable_type=var["data_type"],
             confiance=confiance
         )
-        print(f"Variable créée: {var['nom']} = {var['valeur']} (ID: {var_id})")
-    
-    # Création de scénarios
+        print(f"Variable créée: {var['key']} = {var['value']} (ID: {var_id})")
+
+    # Création de scénarios avec variables harmonisées
     scenario1_vars = [
-        {"nom": "nomClient", "type": "string"},
-        {"nom": "emailClient", "type": "string"},
-        {"nom": "dateFin", "type": "date"}
+        {"key": "nomClient", "data_type": "string"},
+        {"key": "emailClient", "data_type": "string"},
+        {"key": "dateFin", "data_type": "date"}
     ]
-    
+
     scenario1_id = driver.create_scenario(
         nom="Fin de contrat fournisseur",
         description="Génération d'un email de notification 30 jours avant la fin d'un contrat fournisseur",
@@ -106,38 +116,50 @@ def create_test_data(driver: Neo4jDriver):
         variables=scenario1_vars
     )
     print(f"Scénario créé: Fin de contrat fournisseur (ID: {scenario1_id})")
-    
+
     scenario2_vars = [
-        {"nom": "email", "type": "string"},
-        {"nom": "objet", "type": "string"},
-        {"nom": "corps", "type": "string"}
+        {"key": "email", "data_type": "string"},
+        {"key": "objet", "data_type": "string"},
+        {"key": "corps", "data_type": "string"}
     ]
-    
+
     scenario2_id = driver.create_scenario(
         nom="Relance impayé",
         description="Détection d'un impayé et génération automatique d'un email de relance",
         priorite="moyenne",
-        document_ids=[document_ids[0], document_ids[2]],  # Facture et Email de relance
+        # Facture et Email de relance
+        document_ids=[document_ids[0], document_ids[2]],
         variables=scenario2_vars
     )
     print(f"Scénario créé: Relance impayé (ID: {scenario2_id})")
-    
-    # Création d'une automatisation terminée
-    automation_id = driver.start_automation(scenario1_id)
-    
-    # Simuler une exécution réussie
+
+    # Création d'une automatisation terminée avec agent_config
+    agent_config1 = {
+        "model": "llama-4-scout-17b",
+        "prompt_template": "notification_email_template",
+        "temperature": 0.3
+    }
+    automation_id = driver.start_automation(scenario1_id, agent_config=agent_config1)
+
+    # Simuler une exécution réussie avec statuts harmonisés
     driver.update_automation_status(
         automation_id=automation_id,
-        statut="terminé",
+        statut="success",  # Statut harmonisé (au lieu de "terminé")
         resultat="Email de notification généré avec succès",
         duree=12
     )
     print(f"Automatisation créée pour scénario 1 (ID: {automation_id})")
-    
-    # Création d'une automatisation en cours
-    automation_id2 = driver.start_automation(scenario2_id)
-    print(f"Automatisation en cours créée pour scénario 2 (ID: {automation_id2})")
-    
+
+    # Création d'une automatisation en cours avec agent_config
+    agent_config2 = {
+        "model": "mixtral-8x7b",
+        "prompt_template": "unpaid_reminder_template",
+        "temperature": 0.7
+    }
+    automation_id2 = driver.start_automation(scenario2_id, agent_config=agent_config2)
+    print(
+        f"Automatisation en cours (queued) créée pour scénario 2 (ID: {automation_id2})")
+
     print("Données de test créées avec succès!")
 
 
@@ -151,16 +173,16 @@ def main():
             user=config.NEO4J_USER,
             password=config.NEO4J_PASSWORD
         )
-        
+
         # Création des contraintes d'unicité
         print("Création des contraintes...")
         driver.create_constraints()
-        
+
         # Création des données de test
         create_test_data(driver)
-        
+
         print("Initialisation de Neo4j terminée avec succès!")
-        
+
     except Exception as e:
         print(f"Erreur lors de l'initialisation de Neo4j: {e}")
     finally:

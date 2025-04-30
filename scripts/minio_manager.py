@@ -2,6 +2,7 @@ import io
 from minio import Minio
 from minio.error import S3Error
 
+
 class MinioManager:
     def __init__(self, endpoint, access_key, secret_key, bucket, secure=False):
         self.client = Minio(
