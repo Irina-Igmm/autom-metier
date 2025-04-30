@@ -183,19 +183,24 @@ class Neo4jDriver(IDriver):
         priorite: str,
         document_ids: Optional[List[str]] = None,
         variables: Optional[List[Dict[str, str]]] = None,
+        etapes: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         doc_ids = document_ids or []
         vars_ = variables or []
+        steps = etapes or []
         scenario_id = str(uuid.uuid4())
         cypher = (
-            "CREATE (s:Scenario {id: $id, nom: $nom, description: $desc, "
-            "dateCreation: datetime(), statut: 'actif', priorite: $prio}) RETURN s.id AS id"
+            "CREATE (s:Scenario {"
+            "id: $id, nom: $nom, description: $desc, dateCreation: datetime(), "
+            "statut: 'actif', priorite: $prio, etapes: $etapes})"
+            " RETURN s.id AS id"
         )
         record = self._run_tx(cypher, {
             "id": scenario_id,
             "nom": nom,
             "desc": description,
             "prio": priorite,
+            "etapes": steps,
         }).single()
         for d in doc_ids:
             self.link_scenario_to_document(scenario_id, d)

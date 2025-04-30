@@ -1,0 +1,271 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Automation Dashboard</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.4"></script>
+    <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div class="min-h-screen" x-data="dashboard()">
+        <header class="bg-blue-600 text-white shadow">
+            <div class="container mx-auto px-4 py-4">
+                <h1 class="text-2xl font-bold">Automation Dashboard</h1>
+            </div>
+        </header>
+        
+        <main class="container mx-auto px-4 py-8">
+            <!-- Statistics -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
+                <div class="bg-white rounded shadow p-4">
+                    <h2 class="text-lg font-semibold mb-2">Active Tasks</h2>
+                    <p class="text-3xl" x-text="stats.active"></p>
+                </div>
+                <div class="bg-white rounded shadow p-4">
+                    <h2 class="text-lg font-semibold mb-2">Completed</h2>
+                    <p class="text-3xl" x-text="stats.completed"></p>
+                </div>
+                <div class="bg-white rounded shadow p-4">
+                    <h2 class="text-lg font-semibold mb-2">Failed</h2>
+                    <p class="text-3xl" x-text="stats.failed"></p>
+                </div>
+                <div class="bg-white rounded shadow p-4">
+                    <h2 class="text-lg font-semibold mb-2">Average Duration</h2>
+                    <p class="text-3xl" x-text="stats.avgDuration + 's'"></p>
+                </div>
+            </div>
+            
+            <!-- Task List -->
+            <div class="bg-white rounded shadow p-6 mb-6">
+                <h2 class="text-xl font-semibold mb-4">Recent Tasks</h2>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full bg-white">
+                        <thead>
+                            <tr class="bg-gray-200 text-gray-700">
+                                <th class="py-2 px-4 text-left">ID</th>
+                                <th class="py-2 px-4 text-left">Type</th>
+                                <th class="py-2 px-4 text-left">Status</th>
+                                <th class="py-2 px-4 text-left">Created</th>
+                                <th class="py-2 px-4 text-left">Duration</th>
+                                <th class="py-2 px-4 text-left">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="task in tasks" :key="task.id">
+                                <tr class="border-t border-gray-200">
+                                    <td class="py-2 px-4" x-text="task.id.substring(0, 8) + '...'"></td>
+                                    <td class="py-2 px-4" x-text="task.type"></td>
+                                    <td class="py-2 px-4">
+                                        <span 
+                                            :class="{
+                                                'bg-yellow-100 text-yellow-800': task.status === 'queued',
+                                                'bg-blue-100 text-blue-800': task.status === 'running',
+                                                'bg-green-100 text-green-800': task.status === 'completed',
+                                                'bg-red-100 text-red-800': task.status === 'failed'
+                                            }"
+                                            class="px-2 py-1 rounded text-sm"
+                                            x-text="task.status"
+                                        ></span>
+                                    </td>
+                                    <td class="py-2 px-4" x-text="formatDate(task.created_at)"></td>
+                                    <td class="py-2 px-4" x-text="calculateDuration(task)"></td>
+                                    <td class="py-2 px-4">
+                                        <button 
+                                            @click="viewTaskDetails(task)" 
+                                            class="text-blue-600 hover:text-blue-800"
+                                        >
+                                            Details
+                                        </button>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Neo4j Graph Visualization -->
+            <div class="bg-white rounded shadow p-6 mb-6">
+                <h2 class="text-xl font-semibold mb-4">Graph Visualization</h2>
+                <div class="flex justify-center">
+                    <p class="text-gray-500">Graph visualization will be implemented here</p>
+                </div>
+            </div>
+        </main>
+        
+        <!-- Task Details Modal -->
+        <div 
+            x-show="selectedTask" 
+            x-cloak 
+            class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+        >
+            <div class="bg-white rounded shadow-lg w-full max-w-2xl max-h-[80vh] overflow-y-auto">
+                <div class="flex justify-between items-center border-b p-4">
+                    <h3 class="text-lg font-semibold">Task Details</h3>
+                    <button @click="selectedTask = null" class="text-gray-500 hover:text-gray-700">
+                        &times;
+                    </button>
+                </div>
+                <div class="p-4">
+                    <template x-if="selectedTask">
+                        <div>
+                            <div class="grid grid-cols-2 gap-4 mb-4">
+                                <div>
+                                    <p class="text-sm text-gray-600">ID</p>
+                                    <p class="font-medium" x-text="selectedTask.id"></p>
+                                </div>
+                                <div>
+                                    <p class="text-sm text-gray-600">Type</p>
+                                    <p class="font-medium" x-text="selectedTask.type"></p>
+                                </div>
+                                <div>
+                                    <p class="text-sm text-gray-600">Status</p>
+                                    <p class="font-medium" x-text="selectedTask.status"></p>
+                                </div>
+                                <div>
+                                    <p class="text-sm text-gray-600">Created</p>
+                                    <p class="font-medium" x-text="formatDate(selectedTask.created_at, true)"></p>
+                                </div>
+                                <div>
+                                    <p class="text-sm text-gray-600">Started</p>
+                                    <p class="font-medium" x-text="selectedTask.started_at ? formatDate(selectedTask.started_at, true) : 'N/A'"></p>
+                                </div>
+                                <div>
+                                    <p class="text-sm text-gray-600">Completed</p>
+                                    <p class="font-medium" x-text="selectedTask.completed_at ? formatDate(selectedTask.completed_at, true) : 'N/A'"></p>
+                                </div>
+                            </div>
+                            
+                            <!-- Progress -->
+                            <div class="mb-4" x-show="selectedTask.status === 'running'">
+                                <p class="text-sm text-gray-600 mb-1">Progress</p>
+                                <div class="w-full bg-gray-200 rounded-full h-2.5">
+                                    <div 
+                                        class="bg-blue-600 h-2.5 rounded-full" 
+                                        :style="'width: ' + selectedTask.progress + '%'"
+                                    ></div>
+                                </div>
+                            </div>
+                            
+                            <!-- Error -->
+                            <div class="mb-4" x-show="selectedTask.error">
+                                <p class="text-sm text-gray-600 mb-1">Error</p>
+                                <p class="text-red-600 bg-red-50 p-2 rounded" x-text="selectedTask.error"></p>
+                            </div>
+                            
+                            <!-- Logs -->
+                            <div class="mb-4">
+                                <p class="text-sm text-gray-600 mb-1">Logs</p>
+                                <div class="bg-gray-100 p-3 rounded font-mono text-xs h-40 overflow-y-auto">
+                                    <template x-for="(log, index) in selectedTask.logs" :key="index">
+                                        <div :class="{'text-red-600': log.level === 'ERROR'}">
+                                            <span x-text="formatDate(log.timestamp, true)"></span>
+                                            <span x-text="'['+log.level+']'"></span>
+                                            <span x-text="log.message"></span>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        function dashboard() {
+            return {
+                tasks: [],
+                stats: {
+                    active: 0,
+                    completed: 0,
+                    failed: 0,
+                    avgDuration: 0
+                },
+                selectedTask: null,
+                
+                init() {
+                    this.loadTasks();
+                    setInterval(() => this.loadTasks(), 5000);
+                },
+                
+                async loadTasks() {
+                    try {
+                        const response = await fetch('/api/tasks');
+                        if (response.ok) {
+                            this.tasks = await response.json();
+                            this.updateStats();
+                        }
+                    } catch (error) {
+                        console.error('Error fetching tasks:', error);
+                    }
+                },
+                
+                updateStats() {
+                    const active = this.tasks.filter(t => t.status === 'queued' || t.status === 'running').length;
+                    const completed = this.tasks.filter(t => t.status === 'completed').length;
+                    const failed = this.tasks.filter(t => t.status === 'failed').length;
+                    
+                    let totalDuration = 0;
+                    let completedCount = 0;
+                    
+                    this.tasks.forEach(task => {
+                        if (task.status === 'completed' && task.started_at && task.completed_at) {
+                            const start = new Date(task.started_at);
+                            const end = new Date(task.completed_at);
+                            totalDuration += (end - start) / 1000;
+                            completedCount++;
+                        }
+                    });
+                    
+                    this.stats = {
+                        active,
+                        completed,
+                        failed,
+                        avgDuration: completedCount > 0 ? (totalDuration / completedCount).toFixed(1) : 0
+                    };
+                },
+                
+                formatDate(dateStr, showTime = false) {
+                    if (!dateStr) return 'N/A';
+                    const date = new Date(dateStr);
+                    if (showTime) {
+                        return date.toLocaleString();
+                    }
+                    return date.toLocaleDateString();
+                },
+                
+                calculateDuration(task) {
+                    if (!task.started_at) return 'N/A';
+                    
+                    const start = new Date(task.started_at);
+                    const end = task.completed_at ? new Date(task.completed_at) : new Date();
+                    
+                    const seconds = Math.floor((end - start) / 1000);
+                    
+                    if (seconds < 60) {
+                        return seconds + 's';
+                    }
+                    
+                    const minutes = Math.floor(seconds / 60);
+                    const remainingSeconds = seconds % 60;
+                    return minutes + 'm ' + remainingSeconds + 's';
+                },
+                
+                viewTaskDetails(task) {
+                    this.selectedTask = task;
+                }
+            }
+        }
+    </script>
+</body>
+</html>
+            
