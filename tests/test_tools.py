@@ -1,10 +1,13 @@
 import io
 import csv
+import json
+import pytest
 from src.tools.tools import (
-    extract_text_from_bytes,
-    _parse_json_safely,
-    generate_email,
-    fill_html_template,
+    extract_text,
+    extract_variables,
+    safe_parse_json,
+    generate_from_template,
+    submit_form,
 )
 
 
@@ -15,45 +18,50 @@ class DummyResponse:
 
 def test_extract_text_txt_and_csv():
     txt_content = b"Hello\nWorld"
-    txt_text = extract_text_from_bytes("test.txt", txt_content)
+    txt_text = extract_text("test.txt", txt_content)
     assert "Hello" in txt_text
+    assert "World" in txt_text
 
-    csv_content = "a,b,c\n1,2,3".encode()
-    csv_text = extract_text_from_bytes("test.csv", csv_content)
-    assert "a b c" in csv_text
-    assert "1 2 3" in csv_text
+    csv_content = b"a,b,c\n1,2,3"
+    csv_text = extract_text("test.csv", csv_content)
+    # extract_text joins rows without newline
+    assert "a,b,c" in csv_text
+    assert "1,2,3" in csv_text
+
+
+def test_extract_variables(monkeypatch):
+    # Simuler l'invocation LLM qui renvoie un JSON
+    monkeypatch.setattr("src.tools.tools.llm_extractor.invoke",
+                        lambda msgs: '{"montant": 100}')
+    result = extract_variables(b"dummy content", "test.pdf")
+    assert isinstance(result, dict)
+    assert result.get("montant") == 100
 
 
 def test_parse_json_safely_valid_and_code_fence():
     valid = '{"key": "value"}'
-    parsed = _parse_json_safely(valid)
+    parsed = safe_parse_json(valid)
     assert parsed["key"] == "value"
 
     fenced = '```json\n{"foo": 123}```'
-    parsed2 = _parse_json_safely(fenced)
+    parsed2 = safe_parse_json(fenced)
     assert parsed2["foo"] == 123
 
     bad = "not json"
-    parsed3 = _parse_json_safely(bad)
+    parsed3 = safe_parse_json(bad)
     assert "error" in parsed3
 
 
-class MockLLM:
-    def invoke(self, messages):
-        return DummyResponse("Dear Alice, your order is confirmed.")
-
-
-def test_generate_email(monkeypatch):
-    # Monkeypatch LLM with object that has invoke method
-    monkeypatch.setattr("src.tools.tools.llm_generation", MockLLM())
-    variables = {"name": "Alice"}
+def test_generate_from_template():
     template = "Hello {{ name }}"
-    result = generate_email(variables, template)
-    assert "Alice" in result
-    assert "order is confirmed" in result
+    variables = {"name": "Alice"}
+    result = generate_from_template(template, variables)
+    assert "Hello Alice" == result.strip()
 
 
-def test_fill_html_template():
-    template = "<p>Hello {{ name }}</p>"
-    output = fill_html_template(template, {"name": "Bob"})
-    assert "<p>Hello Bob</p>" in output
+def test_submit_form_error(monkeypatch):
+    # Simuler un timeout ou échec de navigation
+    monkeypatch.setattr("src.tools.tools.sync_playwright",
+                        pytest.raises(Exception))
+    res = submit_form("http://invalid.url", {"sel": "val"}, timeout=10)
+    assert res["status"] == "error"

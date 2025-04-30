@@ -94,7 +94,7 @@ class Neo4jDriver(IDriver):
             auth=(self.user, self.password),
             max_connection_lifetime=self.connection_timeout,
             connection_timeout=self.connection_timeout,
-            encrypted=True,
+            encrypted=False,  # Désactive le chiffrement pour connexions locales
         )
         # health check
         with self.driver.session() as session:
@@ -129,6 +129,52 @@ class Neo4jDriver(IDriver):
         except Exception:
             logger.exception("Erreur lors de l'exécution de la requête Cypher")
             raise
+
+    def create_document(self, document=None, **kwargs) -> str:
+        """
+        Crée un nœud Document à partir d'un modèle Pydantic Document ou de paramètres.
+        """
+        from src.models import Document as DocumentModel, Status
+        # Si on reçoit une instance de DocumentModel
+        if isinstance(document, DocumentModel):
+            doc_model = document
+        else:
+            # Récupération des champs legacy
+            titre = kwargs.get('titre') or kwargs.get('nom')
+            type_ = kwargs.get('type') or kwargs.get('type_doc')
+            minio_key = kwargs.get('minio_key') or kwargs.get('chemin')
+            statut = kwargs.get('statut', Status.ACTIF.value)
+            # Création d'une instance DocumentModel pour validation
+            doc_model = DocumentModel(
+                titre=titre,
+                type=type_,
+                minio_key=minio_key,
+                statut=Status(statut)
+            )
+        # Génération d'un UUID
+        doc_id = str(uuid.uuid4())
+        cypher = (
+            "CREATE (d:Document {id: $id, titre: $titre, type: $type, "
+            "minio_key: $key, dateCreation: datetime(), statut: $statut}) "
+            "RETURN d.id AS id"
+        )
+        record = self._run_tx(cypher, {
+            "id": doc_id,
+            "titre": doc_model.titre,
+            "type": doc_model.type,
+            "key": doc_model.minio_key,
+            "statut": doc_model.statut.value,
+        }).single()
+        return record["id"]
+
+    def create_node(self, label: str, props: Dict[str, Any]) -> str:
+        """Crée un nœud avec un label arbitraire et des propriétés données."""
+        # Assure un id dans props
+        node_id = props.get('id', str(uuid.uuid4()))
+        props_with_id = {**props, 'id': node_id}
+        cypher = f"CREATE (n:{label} $props) RETURN n.id AS id"
+        record = self._run_tx(cypher, {'props': props_with_id}).single()
+        return record['id']
 
     def create_scenario(
         self,

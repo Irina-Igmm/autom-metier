@@ -18,7 +18,12 @@ playwright
 # Pour le templating HTML
 Jinja2
 # Pour les tests d'intégration Neo4j
-testcontainers
+testcontainers[neo4j]
 # Pour la gestion des fichiers et des données
 PyPDF2
+pytesseract
+pdf2image==1.17.0
+pdfkit
+
+# Gestion des dépendances de sécurité
 python-jose[cryptography]

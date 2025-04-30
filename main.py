@@ -1,14 +1,17 @@
 # main.py
 import os
 from datetime import datetime, timedelta
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, UploadFile, File
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, UploadFile, File, Request
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 from jose import JWTError, jwt
-from src.models import Scenario, Variable, Automatisation
+from src.models import Scenario, Automatisation, Document as DocumentModel
 from src.neo4j_driver import Neo4jDriver
 from scripts.minio_manager import MinioManager
 import logging
+from pydantic import BaseModel
+from typing import Generator
 
 from src.config import config
 
@@ -21,22 +24,50 @@ app = FastAPI()
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=config.LOG_LEVEL)
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/generate-token")
+security = HTTPBearer()
 
 
-def get_driver() -> Neo4jDriver:
-    neo4j_driver = Neo4jDriver()
-    return neo4j_driver
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Token invalide ou expiré",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(
+            token, config.SECRET_KEY or config.VAR_SYS, algorithms=["HS256"]
+        )
+        subject: str = payload.get("sub")
+        if subject != config.VAR_SYS:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    return subject
 
 
-def get_minio_manager() -> MinioManager:
-    return MinioManager(
+def get_driver(current_user: str = Depends(verify_token)) -> Generator[Neo4jDriver, None, None]:
+    # Création du driver Neo4j pour l'utilisateur authentifié
+    driver = Neo4jDriver()
+    try:
+        yield driver
+    finally:
+        driver.close()
+
+
+def get_minio_manager(current_user: str = Depends(verify_token)) -> MinioManager:
+    # Création du manager MinIO avec contexte utilisateur pour autorisation
+    minio_conf = config.get_minio_config()
+    mgr = MinioManager(
         endpoint=config.MINIO_ENDPOINT,
         access_key=config.MINIO_ACCESS_KEY,
         secret_key=config.MINIO_SECRET_KEY,
         bucket=config.MINIO_BUCKET,
         secure=config.MINIO_SECURE,
     )
+    mgr.current_user = current_user
+    return mgr
+
 
 @app.post("/generate-token/", summary="Génère un JWT valide 1 h")
 def generate_token():
@@ -46,21 +77,23 @@ def generate_token():
         "exp": expire
     }
     token = jwt.encode(
-        payload, config.VAR_SYS, algorithm="HS256")
+        payload, config.SECRET_KEY or config.VAR_SYS, algorithm="HS256")
     return {"access_token": token, "token_type": "bearer", "expires_at": expire.isoformat()}
 
 # 4. Dépendance pour valider le token
 
 
-def verify_token(token: str = Depends(oauth2_scheme)):
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     credentials_exception = HTTPException(
         status_code=401,
         detail="Token invalide ou expiré",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    token = credentials.credentials
     try:
         payload = jwt.decode(
-            token, config.VAR_SYS, algorithms=["HS256"])
+            token, config.SECRET_KEY or config.VAR_SYS, algorithms=["HS256"]
+        )
         subject: str = payload.get("sub")
         if subject != config.VAR_SYS:
             raise credentials_exception
@@ -82,11 +115,11 @@ def create_scenario(
             description=scenario.description,
             priorite=scenario.priorite,
             document_ids=scenario.documents,
-            variables=[{"nom": v.key, "type": v.data_type}
-                       for v in scenario.variables],
+            variables=[
+                {"key": v.key, "data_type": v.data_type.value}
+                for v in scenario.variables
+            ]
         )
-        for doc_id in scenario.documents:
-            driver.link_scenario_to_document(scenario_id, doc_id)
         return {"scenario_id": scenario_id}
     except Exception as e:
         logger.error(f"Erreur création scénario: {e}")
@@ -114,7 +147,7 @@ async def run_scenario(
                 from src.agent import create_dynamic_scenario
                 agent_result = create_dynamic_scenario(
                     document_content=file_bytes,
-                    filename=doc["nom"],
+                    filename=doc["titre"],
                     scenario_nature=scenario["nom"],
                     driver=driver,
                 )
@@ -132,13 +165,24 @@ async def run_scenario(
 
 @app.post("/upload/", dependencies=[Depends(verify_token)])
 async def upload_file(
-    minio_manager: MinioManager = Depends(get_minio_manager),
     file: UploadFile = File(...),
+    type_doc: str = "autre",
+    statut: str = "actif",
+    minio_manager: MinioManager = Depends(get_minio_manager),
+    driver: Neo4jDriver = Depends(get_driver),
 ):
+    """Upload un fichier dans MinIO et créer un nœud Document dans Neo4j."""
     content = await file.read()
     result = minio_manager.upload_file(
         content, file.filename, file.content_type)
-    return {"filename": file.filename, "bucket": result["bucket"]}
+    neo4j_doc_id = driver.create_document(
+        titre=file.filename,
+        type=type_doc,
+        minio_key=file.filename,
+        statut=statut
+    )
+    result["neo4j_doc_id"] = neo4j_doc_id
+    return result
 
 
 @app.get("/download/{filename}", dependencies=[Depends(verify_token)])
@@ -150,17 +194,24 @@ def download_file(
     return StreamingResponse(file_obj, media_type="application/octet-stream")
 
 
+class VariableCreate(BaseModel):
+    document_id: str
+    key: str
+    data_type: str
+    value: str | None = None
+
+
 @app.post("/variables/", dependencies=[Depends(verify_token)])
 def create_variable(
-    variable: Variable,
+    var: VariableCreate,
     driver: Neo4jDriver = Depends(get_driver),
 ):
     try:
         variable_id = driver.link_variable_to_document(
-            document_id=variable.id,
-            variable_nom=variable.key,
-            variable_valeur=variable.value,
-            variable_type=variable.data_type
+            document_id=var.document_id,
+            variable_nom=var.key,
+            variable_valeur=var.value,
+            variable_type=var.data_type,
         )
         return {"variable_id": variable_id}
     except Exception as e:
@@ -237,3 +288,52 @@ def delete_automatisation(automatisation_id: str, driver: Neo4jDriver = Depends(
     except Exception as e:
         logger.error(f"Erreur suppression automatisation: {e}")
         raise HTTPException(status_code=500, detail="Erreur interne")
+
+
+@app.post("/documents/", dependencies=[Depends(verify_token)])
+def create_document(
+    doc: DocumentModel,
+    driver: Neo4jDriver = Depends(get_driver)
+):
+    """Créer un document dans Neo4j sans upload MinIO"""
+    try:
+        doc_id = driver.create_document(
+            titre=doc.titre,
+            type=doc.type,
+            minio_key=doc.minio_key,
+            statut=doc.statut.value
+        )
+        return {"document_id": doc_id}
+    except Exception as e:
+        logger.error(f"Erreur création document: {e}")
+        raise HTTPException(status_code=500, detail="Création échouée")
+
+
+@app.get("/documents/{document_id}", dependencies=[Depends(verify_token)])
+def get_document(document_id: str, driver: Neo4jDriver = Depends(get_driver)):
+    """Récupérer un document par ID"""
+    doc = driver.get_document(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document non trouvé")
+    return doc
+
+
+@app.delete("/documents/{document_id}", dependencies=[Depends(verify_token)])
+def delete_document(document_id: str, driver: Neo4jDriver = Depends(get_driver)):
+    """Supprimer un document et ses relations"""
+    try:
+        driver.delete_entity("Document", document_id)
+        return {"status": "deleted"}
+    except Exception as e:
+        logger.error(f"Erreur suppression document: {e}")
+        raise HTTPException(status_code=500, detail="Erreur interne")
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(
+        f"Erreur inattendue {request.method} {request.url}: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal Server Error"}
+    )

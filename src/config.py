@@ -20,9 +20,13 @@ class Config:
 
     # Configuration Neo4j
     # NEO4J_URI_LOCAL = os.getenv("NEO4J_URI_LOCAL", "bolt://localhost:7687")
+    NEO4J_URI_LOCAL = os.getenv("NEO4J_URI_LOCAL", "bolt://localhost:7687")
     NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
+    NEO4J_MAX_RETRY = int(os.getenv("NEO4J_MAX_RETRY", "3"))
+    NEO4J_RETRY_DELAY = int(os.getenv("NEO4J_RETRY_DELAY", "2"))     # secondes entre retries
+    NEO4J_CONN_TIMEOUT = int(os.getenv("NEO4J_CONN_TIMEOUT", "30"))  # tim
 
     # Configuration MinIO
     MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "localhost:9000")
@@ -56,6 +60,9 @@ class Config:
     SMTP_USER = os.getenv("SMTP_USER", "")
     SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
     SMTP_FROM = os.getenv("SMTP_FROM", "")
+
+    # Web access configuration
+    WEB_TIMEOUT = int(os.getenv("WEB_TIMEOUT", "30000"))
 
     @classmethod
     def get_neo4j_uri(cls):

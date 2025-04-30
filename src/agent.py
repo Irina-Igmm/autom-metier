@@ -7,54 +7,85 @@ import logging
 from langchain.agents import initialize_agent, Tool, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
-from src.tools.tools import (
-    extract_variables_from_document,
-    generate_email,
-    fill_html_template,
-    submit_web_form,
-)
-from src.tools.email_tools import EmailTool
-from src.tools.minio_tools import MinIOTool
-from src.tools.neo4j_tools import Neo4jTool
-from src.tools.pdf_generator_tools import PDFGeneratorTool
+from src.tools.tools import extract_variables, generate_from_template, submit_form
+from scripts.minio_manager import MinioManager
+from src.neo4j_driver import Neo4jDriver
+import io
+from typing import Any, Dict, List
 from src.config import Config as settings
 
-# Initialisation du client Groq Cloud
+# Initialisation du client LLM
 client = ChatGroq(api_key=settings.LLM_API_KEY, model=settings.LLM_MODEL)
 
-# Définition des outils accessibles par l'agent
+# Outils métier exposés
+
+
+def s3_upload(content: bytes, filename: str, content_type: str) -> Dict[str, Any]:
+    cfg = settings.get_minio_config()
+    mgr = MinioManager(**cfg)
+    return mgr.upload_file(content, filename, content_type)
+
+
+def s3_download(filename: str) -> bytes:
+    cfg = settings.get_minio_config()
+    mgr = MinioManager(**cfg)
+    data = mgr.download_file(filename)
+    return data.read()
+
+
+def run_cypher(query: str, params: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    drv = Neo4jDriver(uri=settings.get_neo4j_uri(
+    ), user=settings.NEO4J_USER, password=settings.NEO4J_PASSWORD)
+    results = drv._run_tx(query, params or {})
+    drv.close()
+    return [record.data() for record in results]
+
+
+def generate_email_tool(template: str, variables: Dict[str, Any]) -> str:
+    return generate_from_template(template, variables)
+
+
+def fill_template_tool(template: str, variables: Dict[str, Any]) -> str:
+    return generate_from_template(template, variables)
+
+
+def extract_variables_tool(content: bytes, filename: str) -> Dict[str, Any]:
+    return extract_variables(content, filename)
+
+
+def submit_form_tool(url: str, data: Dict[str, Any], timeout: int = settings.WEB_TIMEOUT) -> Dict[str, Any]:
+    return submit_form(url, data, timeout)
+
+
+def generate_pdf(html: str) -> bytes:
+    # simple HTML-to-PDF via Jinja2 PDFKit or similar
+    try:
+        import pdfkit
+        return pdfkit.from_string(html, False)
+    except Exception:
+        return b""
+
+
 TOOLS = [
-    Tool(
-        name="extract_variables",
-        func=extract_variables_from_document,
-        description="Extraction de variables clés à partir d'un document brut.",
-    ),
-    Tool(
-        name="generate_email",
-        func=generate_email,
-        description="Génération d'un email à partir de variables et d'un template.",
-    ),
-    Tool(
-        name="fill_html_template",
-        func=fill_html_template,
-        description="Remplissage d'un template HTML ou texte avec des variables.",
-    ),
-    Tool(
-        name="submit_web_form",
-        func=submit_web_form,
-        description="Soumission automatisée d'un formulaire web.",
-    ),
+    Tool(name="s3_upload", func=s3_upload,
+         description="Upload un objet dans MinIO"),
+    Tool(name="s3_download", func=s3_download,
+         description="Télécharger un objet depuis MinIO"),
+    Tool(name="run_cypher", func=run_cypher,
+         description="Exécuter une requête Cypher sur Neo4j"),
+    Tool(name="extract_variables", func=extract_variables_tool,
+         description="Extraire des variables d'un document"),
+    Tool(name="generate_email", func=generate_email_tool,
+         description="Générer un email via template"),
+    Tool(name="fill_template", func=fill_template_tool,
+         description="Remplir un template HTML"),
+    Tool(name="submit_web_form", func=submit_form_tool,
+         description="Soumission de formulaire web"),
+    Tool(name="generate_pdf", func=generate_pdf,
+         description="Générer un PDF à partir de HTML"),
 ]
 
-# Définition des descriptions des types de scénarios (pour l'agent)
-SCENARIO_DESCRIPTIONS = {
-    "contract_end": "Détection de fin de contrat et génération automatique d'email de renouvellement",
-    "invoice_receipt": "Traitement de facture entrante, vérification des doublons et génération d'accusé de réception",
-    "unpaid_invoice": "Détection de facture impayée et génération d'email de relance",
-    "product_catalog": "Extraction de produits depuis un catalogue et création des relations dans Neo4j",
-}
-
-# Initialisation de l'agent multi-outils avec ReAct
+# Initialisation de l'agent multi-outils
 agent_executor = AgentExecutor.from_agent_and_tools(
     agent=initialize_agent(
         tools=TOOLS, llm=client, agent="zero-shot-react-description", verbose=True
@@ -117,14 +148,13 @@ def create_dynamic_scenario(
     Crée et exécute dynamiquement un scénario métier centré sur l'agent IA et la base Neo4j.
     L'agent multi-outils reçoit le contexte et la consigne, puis choisit et enchaîne les outils de façon autonome.
     """
-    import json
-    from src.neo4j_driver import neo4j_driver
+    from src.neo4j_driver import Neo4jDriver
     from scripts.minio_manager import MinioManager
     from src.config import config
     from datetime import datetime
 
     if driver is None:
-        driver = neo4j_driver
+        driver = Neo4jDriver()
     scenario_name = f"Scénario {scenario_nature} {datetime.utcnow().isoformat()}"
     scenario_desc = f"Automatisation IA pour {scenario_nature} (créé automatiquement)"
     scenario_id = driver.create_scenario(
@@ -144,11 +174,12 @@ def create_dynamic_scenario(
     )
     minio_manager.upload_file(
         document_content, filename, "application/octet-stream")
+    # create_document matches Pydantic model fields
     doc_id = driver.create_document(
-        nom=filename,
-        type_doc="automatique",
-        chemin=filename,
-        statut="actif",
+        titre=filename,
+        type="automatique",
+        minio_key=filename,
+        statut="actif"
     )
     driver.link_scenario_to_document(scenario_id, doc_id)
     # Construit le contexte pour l'agent
@@ -168,7 +199,7 @@ def create_dynamic_scenario(
     """
     # L'agent multi-outils agit de façon autonome
     try:
-        result = agent_executor.invoke(
+        raw_plan = agent_executor.invoke(
             {
                 "input": context,
                 "document_content": document_content,
@@ -177,10 +208,27 @@ def create_dynamic_scenario(
                 "neo4j_scenario_id": scenario_id,
             }
         )
+        # parse JSON plan
+        import json
+        plan = raw_plan if isinstance(raw_plan, dict) else json.loads(raw_plan)
+        actions = plan.get("actions", [])
     except Exception as e:
-        result = {"error": str(e)}
+        return {"scenario_id": scenario_id, "document_id": doc_id, "error": str(e)}
+
+    # exécuter chaque action via run_agent_tool
+    results: List[Dict[str, Any]] = []
+    for act in actions:
+        name = act.get("tool")
+        params = act.get("parameters", {})
+        try:
+            out = run_agent_tool(name, **params)
+        except Exception as ex:
+            out = {"error": str(ex)}
+        results.append({"tool": name, "result": out})
+
     return {
         "scenario_id": scenario_id,
         "document_id": doc_id,
-        "agent_result": result,
+        "actions_executed": results,
+        "plan_explanation": plan.get("explanation")
     }

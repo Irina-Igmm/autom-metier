@@ -36,13 +36,12 @@ async def upload_file(file: UploadFile = File(...), type_doc: str = "autre", sta
     try:
         logger.info(f"Début upload fichier {file.filename} de type {type_doc}")
         content = await file.read()
-        result = minio_manager.upload_file(
-            content, file.filename, file.content_type)
+        result = minio_manager.upload_file(content, file.filename, file.content_type)
         # Appel à Neo4j pour stocker les métadonnées du document
         doc_id = driver.create_document(
-            nom=file.filename,
-            type_doc=type_doc,
-            chemin=file.filename,  # Le minio_key correspond au nom du fichier dans le bucket
+            titre=file.filename,
+            type=type_doc,
+            minio_key=file.filename,
             statut=statut
         )
         result["neo4j_doc_id"] = doc_id

@@ -16,7 +16,7 @@ class Priority(Enum):
 
 
 class Document(BaseModel):
-    id: Optional[str]
+    id: Optional[str] = None
     titre: str
     type: str
     minio_key: str
