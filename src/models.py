@@ -1,19 +1,21 @@
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 import uuid
 from pydantic import BaseModel, Field
 
 
 class Status(Enum):
     ACTIF = "actif"
-    ARCHIVE = "archivé"
+    ARCHIVE = "archive"
+    BROUILLON = "brouillon"
 
 
 class Priority(Enum):
-    BASSE = "basse"
-    MOYENNE = "moyenne"
-    HAUTE = "haute"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    URGENT = "URGENT"
 
 
 class Document(BaseModel):
@@ -21,8 +23,16 @@ class Document(BaseModel):
     titre: str
     type: str
     minio_key: str
-    date_creation: datetime = Field(default_factory=datetime.utcnow)
     statut: Status = Status.ACTIF
+    date_creation: datetime = Field(default_factory=datetime.utcnow)
+
+
+class VariableType(str, Enum):
+    TEXT = "TEXT"
+    INTEGER = "INTEGER"
+    DECIMAL = "DECIMAL"
+    DATE = "DATE"
+    BOOLEAN = "BOOLEAN"
 
 
 class DataType(Enum):
@@ -34,10 +44,20 @@ class DataType(Enum):
 class Variable(BaseModel):
     id: Optional[str] = str(uuid.uuid4())
     key: str
-    data_type: DataType
-    value: Optional[str]
+    value: Optional[Any] = None
+    data_type: VariableType = VariableType.TEXT
     date_extraction: datetime = Field(default_factory=datetime.utcnow)
     confiance: Optional[float]
+    
+    
+class VariableCreate(BaseModel):
+    """Modèle pour la création d'une variable associée à un document"""
+    document_id: str
+    key: str
+    value: Any
+    data_type: str = VariableType.TEXT.value
+    methode: str = "IA"
+    confiance: float = 1.0
 
 
 class StepCondition(BaseModel):
@@ -84,14 +104,20 @@ class Step(BaseModel):
         return self.condition.evaluate(variables)
 
 
+class Etape(BaseModel):
+    nom: str
+    description: str
+    ordre: int
+
+
 class Scenario(BaseModel):
     id: Optional[str] = str(uuid.uuid4())
     nom: str
     description: Optional[str] = ""
-    priorite: Priority = Priority.MOYENNE
+    priorite: Priority = Priority.MEDIUM
     documents: List[str] = []
     variables: List[Variable] = [] 
-    etapes: List[Step] = []
+    etapes: List[Etape] = []
 
 
 class RunStatus(Enum):
@@ -109,3 +135,17 @@ class Automatisation(BaseModel):
     statut: RunStatus = RunStatus.QUEUED
     resultat: Optional[Dict]
     duree_ms: Optional[int]
+
+
+# Nouveau modèle pour les résultats générés
+class ResultatGenere(BaseModel):
+    """Modèle pour représenter un résultat généré par une automatisation"""
+    id: Optional[str] = None
+    automatisation_id: str
+    scenario_id: str
+    type: str = "document"  # document, email, pdf, etc.
+    titre: str
+    minio_key: Optional[str] = None  # Référence au fichier dans MinIO
+    variables_utilisees: List[str] = []  # Liste des IDs de variables utilisées
+    date_creation: Optional[datetime] = Field(default_factory=datetime.utcnow)
+    metadonnees: Optional[Dict[str, Any]] = Field(default_factory=dict)

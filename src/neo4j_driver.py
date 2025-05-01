@@ -213,13 +213,16 @@ class Neo4jDriver(IDriver):
             "statut: 'actif', priorite: $prio, etapes: $etapes})"
             " RETURN s.id AS id"
         )
+        # Convertir la liste d'étapes en JSON
+        etapes_json = json.dumps(steps)
+
         # fetch list of records
         records = self._run_tx(cypher, {
             "id": scenario_id,
             "nom": nom,
             "desc": description,
             "prio": priorite,
-            "etapes": steps,
+            "etapes": etapes_json,  # Utiliser la version JSON
         })
         if not records:
             raise RuntimeError("Échec de la création du scénario")
@@ -342,8 +345,20 @@ class Neo4jDriver(IDriver):
         record = records[0]
         if not record:
             return {}
+
+        # Récupérer le scénario et convertir en dictionnaire
+        scenario_dict = dict(record["scenario"])
+
+        # Désérialiser la chaîne JSON des étapes si elle existe
+        if "etapes" in scenario_dict and isinstance(scenario_dict["etapes"], str):
+            try:
+                scenario_dict["etapes"] = json.loads(scenario_dict["etapes"])
+            except:
+                # En cas d'erreur de parsing, laisser tel quel
+                pass
+
         return {
-            "scenario": dict(record["scenario"]),
+            "scenario": scenario_dict,
             "documents": [dict(d) for d in record["documents"]],
             "variables": [dict(v) for v in record["variables"]]
         }
@@ -432,6 +447,110 @@ class Neo4jDriver(IDriver):
     def rollback(self, tx: Transaction) -> None:
         tx.rollback()
         tx.close()
+
+    def create_resultat_genere(self,
+                               titre: str,
+                               minio_key: str,
+                               automatisation_id: str,
+                               scenario_id: str,
+                               type_resultat: str = "document",
+                               variables_utilisees: List[str] = None,
+                               metadonnees: Dict[str, Any] = None) -> str:
+        """
+        Crée un noeud ResultatGenere dans Neo4j et établit les relations avec l'Automatisation et le Scénario
+
+        Args:
+            titre: Titre du résultat généré
+            minio_key: Clé MinIO du fichier résultat
+            automatisation_id: ID de l'automatisation qui a généré ce résultat  
+            scenario_id: ID du scénario associé
+            type_resultat: Type de résultat (document, email, pdf...)
+            variables_utilisees: Liste des IDs des variables utilisées
+            metadonnees: Métadonnées supplémentaires à stocker
+
+        Returns:
+            ID du noeud ResultatGenere créé
+        """
+        resultat_id = str(uuid.uuid4())
+        variables_utilisees = variables_utilisees or []
+        metadonnees = metadonnees or {}
+
+        # Création du noeud ResultatGenere
+        query = """
+        CREATE (r:ResultatGenere {
+            id: $id,
+            titre: $titre,
+            minio_key: $minio_key,
+            type: $type,
+            date_creation: datetime(),
+            metadonnees: $metadonnees
+        })
+        WITH r
+        MATCH (a:Automatisation {id: $automatisation_id})
+        MATCH (s:Scenario {id: $scenario_id})
+        CREATE (a)-[:A_GENERE]->(r)
+        CREATE (r)-[:LIE_A]->(s)
+        RETURN r.id as id
+        """
+
+        params = {
+            "id": resultat_id,
+            "titre": titre,
+            "minio_key": minio_key,
+            "type": type_resultat,
+            "automatisation_id": automatisation_id,
+            "scenario_id": scenario_id,
+            "metadonnees": json.dumps(metadonnees)
+        }
+
+        result = self._run_tx(query, params)
+
+        # Lier aux variables utilisées si spécifiées
+        if variables_utilisees:
+            for var_id in variables_utilisees:
+                self._run_tx("""
+                MATCH (r:ResultatGenere {id: $resultat_id})
+                MATCH (v:Variable {id: $var_id})
+                CREATE (r)-[:UTILISE]->(v)
+                """, {"resultat_id": resultat_id, "var_id": var_id})
+
+        return resultat_id
+
+    def get_resultats_pour_automatisation(self, automatisation_id: str) -> List[Dict[str, Any]]:
+        """
+        Récupère tous les résultats associés à une automatisation
+
+        Args:
+            automatisation_id: ID de l'automatisation
+
+        Returns:
+            Liste des résultats générés
+        """
+        query = """
+        MATCH (a:Automatisation {id: $automatisation_id})-[:A_GENERE]->(r:ResultatGenere)
+        RETURN r
+        """
+
+        results = self._run_tx(query, {"automatisation_id": automatisation_id})
+        return [dict(result["r"]) for result in results]
+
+    def get_resultats_pour_scenario(self, scenario_id: str) -> List[Dict[str, Any]]:
+        """
+        Récupère tous les résultats associés à un scénario
+
+        Args:
+            scenario_id: ID du scénario
+
+        Returns:
+            Liste des résultats générés
+        """
+        query = """
+        MATCH (s:Scenario {id: $scenario_id})<-[:LIE_A]-(r:ResultatGenere)
+        RETURN r
+        """
+
+        results = self._run_tx(query, {"scenario_id": scenario_id})
+        return [dict(result["r"]) for result in results]
 
 
 # Instance partagée pour l'application
