@@ -90,7 +90,7 @@ class Scenario(BaseModel):
     description: Optional[str] = ""
     priorite: Priority = Priority.MOYENNE
     documents: List[str] = []
-    variables: List[Variable] = []  # Changé de List[str] à List[Variable]
+    variables: List[Variable] = [] 
     etapes: List[Step] = []
 
 

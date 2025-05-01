@@ -14,10 +14,11 @@ from fastapi.templating import Jinja2Templates
 from jose import JWTError, jwt
 from pydantic import BaseModel
 
-from src.agent import run_agent_tool
+from src.agent import run_agent_tool, agent_executor, action_planning_prompt as prompt_template
 from src.models import Scenario, Automatisation, Document as DocumentModel
 from src.neo4j_driver import Neo4jDriver
 from scripts.minio_manager import MinioManager
+from src.tools.tools import safe_parse_json
 import logging
 
 from src.config import config
@@ -241,10 +242,21 @@ async def run_scenario_enhanced(
                 raise ValueError(f"Scenario not found: {scenario_id}")
             log(f"Scenario loaded: {data['scenario'].get('nom', 'Unnamed')}")
             steps = data['scenario'].get('etapes', [])
+            # If no predefined steps, let the agent generate plan on the fly
             if not steps:
-                log("No steps found in scenario", level="ERROR")
-                raise ValueError("Scenario has no steps to execute")
-            steps = sorted(steps, key=lambda e: e['ordre'])
+                log("No predefined steps: agent will create plan on the fly")
+                plan_prompt = prompt_template.format(
+                    scenario_id=scenario_id,
+                    document_id=(data['documents'][0]['id'] if data.get('documents') else None),
+                    document_type=(data['documents'][0].get('type') if data.get('documents') else None),
+                    scenario_description=data['scenario'].get('description', '')
+                )
+                raw = agent_executor.invoke({'input': plan_prompt})
+                plan = safe_parse_json(raw)
+                steps = plan.get('actions', []) if isinstance(plan, dict) else []
+                # Persist generated steps
+                driver.update_scenario_etapes(scenario_id, steps)
+            steps = sorted(steps, key=lambda e: e.get('ordre', 0))
             results = []
             for i, step in enumerate(steps):
                 tool = step['outil']
