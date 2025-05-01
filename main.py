@@ -1,16 +1,12 @@
 # main.py
+from fastapi.encoders import jsonable_encoder
 import os
 from datetime import datetime, timedelta
-import time
-import json
 import uuid
-import asyncio
-from collections import deque
-import threading
 from contextlib import asynccontextmanager
-from typing import Dict, List, Any, Optional, Generator, Callable
+from typing import Generator
 
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
@@ -22,13 +18,9 @@ from src.agent import run_agent_tool
 from src.models import Scenario, Automatisation, Document as DocumentModel
 from src.neo4j_driver import Neo4jDriver
 from scripts.minio_manager import MinioManager
-from src.task_queue import TaskQueue
 import logging
 
 from src.config import config
-
-# Initialize TaskQueue instance
-task_queue = TaskQueue(max_concurrent=config.MAX_CONCURRENT_TASKS if hasattr(config, 'MAX_CONCURRENT_TASKS') else 3)
 
 # Setup templates for dashboard
 templates = Jinja2Templates(directory="templates")
@@ -158,7 +150,7 @@ async def get_tasks(token: str = None):
     """Get all tasks with their status and details
     Can be accessed without authentication for the dashboard, but requires token for sensitive details
     """
-    tasks = task_queue.get_all_tasks()
+    tasks = list(getattr(run_scenario_enhanced, "tasks", {}).values())
 
     # If no token provided, return limited information (for dashboard)
     if not token:
@@ -188,308 +180,101 @@ async def get_tasks(token: str = None):
 @app.get("/api/tasks/{task_id}", response_class=JSONResponse)
 async def get_task(task_id: str, credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Get details of a specific task (requires authentication)"""
-    task_info = task_queue.get_task_info(task_id)
-    if not task_info:
+    task = getattr(run_scenario_enhanced, "tasks", {}).get(task_id)
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    return task_info
+    return task
 
 
 @app.post("/api/scenarios/{scenario_id}/run", dependencies=[Depends(verify_token)])
 async def run_scenario_enhanced(
     scenario_id: str,
+    background_tasks: BackgroundTasks,
     driver: Neo4jDriver = Depends(get_driver),
-    minio_manager: MinioManager = Depends(get_minio_manager),
-    wait_for_result: bool = False,
+    # minio_manager: MinioManager = Depends(get_minio_manager),
 ):
-    """Run a scenario with enhanced task queue management and status tracking"""
-    # Create automation in Neo4j
-    automation_id = driver.start_automation(scenario_id, agent_config={})
+    """Trigger scenario execution asynchronously via BackgroundTasks."""
+    import json
+    import time
+    from datetime import datetime
+    # Create automation instance in Neo4j
+    automation_id = driver.start_automation(
+        scenario_id, agent_config=json.dumps({}))
+    task_id = str(uuid.uuid4())
+    # Initialize task status for dashboard
+    task_status = {
+        "id": task_id,
+        "type": "scenario_execution",
+        "status": "queued",
+        "created_at": datetime.utcnow().isoformat(),
+        "started_at": None,
+        "completed_at": None,
+        "progress": 0,
+        "logs": [],
+        "result": None,
+        "error": None,
+        "automation_id": automation_id,
+        "scenario_id": scenario_id
+    }
+    # Register task for dashboard tracking
+    tasks_store = getattr(run_scenario_enhanced, "tasks", {})
+    tasks_store[task_id] = task_status
+    run_scenario_enhanced.tasks = tasks_store
 
-    # Define the execution function
-    def execute_scenario(scenario_id=scenario_id, automation_id=automation_id):
-        # Get the task_id from the TaskQueue context
-        task_id = threading.current_thread().task_id if hasattr(
-            threading.current_thread(), 'task_id') else None
-        task_info = task_queue.tasks.get(task_id) if task_id else None
+    def update_task(**kwargs):
+        run_scenario_enhanced.tasks[task_id].update(**kwargs)
 
+    def log(msg, level="INFO"):
+        run_scenario_enhanced.tasks[task_id]["logs"].append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "level": level,
+            "message": msg
+        })
+
+    def execute_scenario():
+        update_task(status="running", started_at=datetime.utcnow().isoformat())
         start_time = time.time()
-        variables = {}  # Store extracted variables for conditional execution
-
         try:
-            # Log the start of execution
-            if task_info:
-                task_info.log(f"Starting scenario execution: {scenario_id}")
-
-            # Get scenario details with related documents and variables
+            log(f"Starting scenario execution: {scenario_id}")
             data = driver.get_scenario_with_relations(scenario_id)
             if not data:
                 raise ValueError(f"Scenario not found: {scenario_id}")
-
-            if task_info:
-                task_info.log(
-                    f"Scenario loaded: {data['scenario'].get('nom', 'Unnamed')}")
-                task_info.update_progress(10)
-
-            # Get steps and dependencies
+            log(f"Scenario loaded: {data['scenario'].get('nom', 'Unnamed')}")
             steps = data['scenario'].get('etapes', [])
             if not steps:
-                if task_info:
-                    task_info.log("No steps found in scenario")
+                log("No steps found in scenario", level="ERROR")
                 raise ValueError("Scenario has no steps to execute")
-
-            # Sort steps by order
             steps = sorted(steps, key=lambda e: e['ordre'])
-            total_steps = len(steps)
-
-            # Initialize results and executed steps tracker
             results = []
-            executed_steps = set()
-            step_outputs = {}
-
-            # Track progress
-            if task_info:
-                task_info.log(f"Executing {total_steps} steps")
-                task_info.update_progress(20)
-
-            # First, execute steps that extract variables
             for i, step in enumerate(steps):
-                # Skip steps with dependencies for now
-                if step.get('dependencies'):
-                    continue
-
-                # Execute extraction steps first
-                if step.get('outil') == 'extract_variables':
-                    tool = step['outil']
-                    params = step.get('params', {})
-
-                    if task_info:
-                        task_info.log(
-                            f"Executing variable extraction step: {tool}")
-
-                    try:
-                        output = run_agent_tool(tool, **params)
-
-                        # Store variables for conditional execution
-                        if isinstance(output, dict):
-                            variables.update(output)
-
-                        step_outputs[i] = output
-                        executed_steps.add(i)
-
-                        results.append({
-                            'step': i + 1,
-                            'outil': tool,
-                            'status': 'success',
-                            'result': output
-                        })
-
-                        # Update progress
-                        progress_pct = 20 + \
-                            (30 * len(executed_steps) / total_steps)
-                        if task_info:
-                            task_info.log(
-                                f"Extracted variables: {', '.join(output.keys()) if isinstance(output, dict) else 'none'}")
-                            task_info.update_progress(int(progress_pct))
-
-                    except Exception as e:
-                        if task_info:
-                            task_info.log(
-                                f"Error in extraction step: {str(e)}", "ERROR")
-
-                        results.append({
-                            'step': i + 1,
-                            'outil': tool,
-                            'status': 'error',
-                            'error': str(e)
-                        })
-
-            # Then execute the remaining steps with dependency and condition checking
-            remaining_steps = [i for i in range(
-                len(steps)) if i not in executed_steps]
-
-            while remaining_steps:
-                progress = False
-
-                for i in list(remaining_steps):
-                    step = steps[i]
-                    tool = step['outil']
-                    params = step.get('params', {})
-                    dependencies = step.get('dependencies', [])
-                    condition = step.get('condition')
-
-                    # Check if dependencies are met
-                    deps_met = all(
-                        dep in executed_steps for dep in dependencies)
-                    if not deps_met:
-                        continue
-
-                    # Check if condition is met
-                    condition_met = True
-                    if condition:
-                        var_key = condition.get('variable_key')
-                        operator = condition.get('operator')
-                        value = condition.get('value')
-
-                        if var_key and var_key in variables:
-                            var_value = variables[var_key]
-
-                            if operator == 'equals' and var_value != value:
-                                condition_met = False
-                            elif operator == 'not_equals' and var_value == value:
-                                condition_met = False
-                            elif operator == 'contains' and value not in str(var_value):
-                                condition_met = False
-                            elif operator == 'greater_than' and not (float(var_value) > float(value)):
-                                condition_met = False
-                            elif operator == 'less_than' and not (float(var_value) < float(value)):
-                                condition_met = False
-
-                    if not condition_met:
-                        if task_info:
-                            task_info.log(
-                                f"Skipping step {i+1} ({tool}) - condition not met")
-
-                        # Mark as executed but skipped
-                        executed_steps.add(i)
-                        remaining_steps.remove(i)
-                        results.append({
-                            'step': i + 1,
-                            'outil': tool,
-                            'status': 'skipped',
-                            'reason': 'condition not met'
-                        })
-                        progress = True
-                        continue
-
-                    # Execute the step
-                    if task_info:
-                        task_info.log(
-                            f"Executing step {i+1}/{total_steps}: {tool}")
-
-                    try:
-                        # Execute with retry if configured
-                        retry_strategy = step.get('retry_strategy')
-                        timeout = step.get('timeout_seconds', 60)
-
-                        # Basic timeout handling
-                        def execute_with_timeout():
-                            return run_agent_tool(tool, **params)
-
-                        if retry_strategy:
-                            max_attempts = retry_strategy.get(
-                                'max_attempts', 3)
-                            delay = retry_strategy.get('delay_seconds', 2)
-
-                            # Simple retry logic
-                            attempt = 0
-                            last_error = None
-
-                            while attempt < max_attempts:
-                                try:
-                                    output = execute_with_timeout()
-                                    break
-                                except Exception as e:
-                                    attempt += 1
-                                    last_error = e
-                                    if attempt < max_attempts:
-                                        if task_info:
-                                            task_info.log(
-                                                f"Retry {attempt}/{max_attempts} after error: {str(e)}")
-                                        time.sleep(delay)
-
-                            if attempt == max_attempts:
-                                raise last_error
-                        else:
-                            # No retry, just execute once
-                            output = execute_with_timeout()
-
-                        # Store output for dependencies
-                        step_outputs[i] = output
-
-                        # Store variables if this is a variable extraction step
-                        if tool == 'extract_variables' and isinstance(output, dict):
-                            variables.update(output)
-
-                        results.append({
-                            'step': i + 1,
-                            'outil': tool,
-                            'status': 'success',
-                            'result': output
-                        })
-
-                    except Exception as e:
-                        if task_info:
-                            task_info.log(
-                                f"Error in step {i+1}: {str(e)}", "ERROR")
-
-                        results.append({
-                            'step': i + 1,
-                            'outil': tool,
-                            'status': 'error',
-                            'error': str(e)
-                        })
-
-                        # Handle failure based on the step's configuration
-                        on_failure = step.get('on_failure', 'abort')
-                        if on_failure == 'abort':
-                            if task_info:
-                                task_info.log(
-                                    "Aborting scenario due to step failure")
-                            raise ValueError(
-                                f"Step {i+1} failed and is configured to abort: {str(e)}")
-
-                    # Mark as executed
-                    executed_steps.add(i)
-                    remaining_steps.remove(i)
-                    progress = True
-
-                    # Update progress
-                    progress_pct = 50 + \
-                        (40 * len(executed_steps) / total_steps)
-                    if task_info:
-                        task_info.update_progress(int(progress_pct))
-
-                # If no progress was made in this iteration, we have a dependency cycle
-                if not progress and remaining_steps:
-                    if task_info:
-                        task_info.log(
-                            "Dependency cycle or unmet dependencies detected", "ERROR")
-                    raise ValueError(
-                        "Cannot complete scenario - dependency cycle or unmet dependencies")
-
-            # Calculate duration and update automation status
+                tool = step['outil']
+                params = step.get('params', {})
+                try:
+                    out = run_agent_tool(tool, **params)
+                    results.append({'step': i+1, 'outil': tool,
+                                   'status': 'success', 'result': out})
+                except Exception as ex:
+                    log(f"Error in step {i+1}: {str(ex)}", level="ERROR")
+                    results.append({'step': i+1, 'outil': tool,
+                                   'status': 'error', 'error': str(ex)})
             duration_ms = int((time.time() - start_time) * 1000)
-
-            if task_info:
-                task_info.log(
-                    f"Scenario executed successfully in {duration_ms}ms")
-                task_info.update_progress(100)
-
-            # Update Neo4j with results
             driver.update_automation_status(
                 automation_id=automation_id,
                 statut='terminé',
                 resultat=json.dumps(results),
                 duree_ms=duration_ms
             )
-
-            return {
-                'automation_id': automation_id,
-                'scenario_id': scenario_id,
-                'status': 'completed',
-                'duration_ms': duration_ms,
-                'steps': results
-            }
-
+            driver.update_scenario(
+                scenario_id=scenario_id,
+                statut='completed',
+                resultat=json.dumps({"actions": results})
+            )
+            update_task(status="completed", completed_at=datetime.utcnow(
+            ).isoformat(), result=results, progress=100)
         except Exception as e:
-            # Log the error and update the automation status
             error_msg = str(e)
-            if task_info:
-                task_info.log(
-                    f"Scenario execution failed: {error_msg}", "ERROR")
-
+            log(f"Scenario execution failed: {error_msg}", level="ERROR")
             duration_ms = int((time.time() - start_time) * 1000)
-
             try:
                 driver.update_automation_status(
                     automation_id=automation_id,
@@ -497,56 +282,19 @@ async def run_scenario_enhanced(
                     resultat=json.dumps({'error': error_msg}),
                     duree_ms=duration_ms
                 )
+                driver.update_scenario(
+                    scenario_id=scenario_id,
+                    statut='failed',
+                    resultat=json.dumps({"error": error_msg})
+                )
             except Exception as update_error:
-                if task_info:
-                    task_info.log(
-                        f"Failed to update automation status: {str(update_error)}", "ERROR")
+                log(f"Failed to update status: {str(update_error)}",
+                    level="ERROR")
+            update_task(status="failed", completed_at=datetime.utcnow(
+            ).isoformat(), error=error_msg, progress=100)
 
-            return {
-                'automation_id': automation_id,
-                'scenario_id': scenario_id,
-                'status': 'failed',
-                'error': error_msg,
-                'duration_ms': duration_ms
-            }
-
-    # Add task to the queue
-    task_id = task_queue.add_task(
-        task_type="scenario_execution",
-        task_func=execute_scenario,
-        params={"scenario_id": scenario_id, "automation_id": automation_id}
-    )
-
-    # Wait for result if requested
-    if wait_for_result:
-        # Poll for task completion
-        max_wait_sec = 60  # Maximum wait time (adjust as needed)
-        poll_interval_sec = 0.5
-        waited_sec = 0
-
-        while waited_sec < max_wait_sec:
-            task_info = task_queue.get_task_info(task_id)
-            if task_info["status"] in ["completed", "failed"]:
-                return {
-                    "task_id": task_id,
-                    "automation_id": automation_id,
-                    "status": task_info["status"],
-                    "result": task_info["result"],
-                    "error": task_info.get("error")
-                }
-
-            await asyncio.sleep(poll_interval_sec)
-            waited_sec += poll_interval_sec
-
-        # If we get here, we've timed out waiting
-        return {
-            "task_id": task_id,
-            "automation_id": automation_id,
-            "status": "running",
-            "message": "Task is still running, check status later"
-        }
-
-    # Return immediately with task ID
+    # Schedule background execution
+    background_tasks.add_task(execute_scenario)
     return {
         "task_id": task_id,
         "automation_id": automation_id,
@@ -621,7 +369,8 @@ def get_variable(variable_id: str, driver: Neo4jDriver = Depends(get_driver)):
 @app.delete("/variables/{variable_id}", dependencies=[Depends(verify_token)])
 def delete_variable(variable_id: str, driver: Neo4jDriver = Depends(get_driver)):
     with driver.driver.session() as session:
-        session.run("MATCH (v:Variable {id: $id}) DETACH DELETE v", id=variable_id)
+        session.run(
+            "MATCH (v:Variable {id: $id}) DETACH DELETE v", id=variable_id)
     return {"status": "deleted"}
 
 
@@ -640,18 +389,22 @@ def create_automatisation(
 @app.get("/automatisations/{automatisation_id}", dependencies=[Depends(verify_token)])
 def get_automatisation(automatisation_id: str, driver: Neo4jDriver = Depends(get_driver)):
     with driver.driver.session() as session:
-        record = session.run(
+        rec = session.run(
             "MATCH (a:Automatisation {id: $id}) RETURN a", id=automatisation_id
         ).single()
-    if not record:
-        raise HTTPException(status_code=404, detail="Automatisation non trouvée")
-    return dict(record["a"])
+    if not rec:
+        raise HTTPException(
+            status_code=404, detail="Automatisation non trouvée")
+    node = dict(rec["a"])
+    # jsonable_encoder va transformer dateExecution en chaîne ISO
+    return JSONResponse(content=jsonable_encoder(node))
 
 
 @app.delete("/automatisations/{automatisation_id}", dependencies=[Depends(verify_token)])
 def delete_automatisation(automatisation_id: str, driver: Neo4jDriver = Depends(get_driver)):
     with driver.driver.session() as session:
-        session.run("MATCH (a:Automatisation {id: $id}) DETACH DELETE a", id=automatisation_id)
+        session.run(
+            "MATCH (a:Automatisation {id: $id}) DETACH DELETE a", id=automatisation_id)
     return {"status": "deleted"}
 
 

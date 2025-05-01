@@ -1,6 +1,7 @@
 from datetime import datetime
 from enum import Enum
 from typing import List, Optional, Dict, Any
+import uuid
 from pydantic import BaseModel, Field
 
 
@@ -16,7 +17,7 @@ class Priority(Enum):
 
 
 class Document(BaseModel):
-    id: Optional[str] = None
+    id: Optional[str] = str(uuid.uuid4())
     titre: str
     type: str
     minio_key: str
@@ -31,7 +32,7 @@ class DataType(Enum):
 
 
 class Variable(BaseModel):
-    id: Optional[str]
+    id: Optional[str] = str(uuid.uuid4())
     key: str
     data_type: DataType
     value: Optional[str]
@@ -44,14 +45,14 @@ class StepCondition(BaseModel):
     variable_key: str
     operator: str  # equals, not_equals, contains, greater_than, less_than
     value: Any
-    
+
     def evaluate(self, variables: Dict[str, Any]) -> bool:
         """Evaluate if the condition is true based on the provided variables"""
         if self.variable_key not in variables:
             return False
-            
+
         var_value = variables[self.variable_key]
-        
+
         if self.operator == "equals":
             return var_value == self.value
         elif self.operator == "not_equals":
@@ -71,10 +72,11 @@ class Step(BaseModel):
     ordre: int
     dependencies: List[str] = []  # IDs of steps this step depends on
     condition: Optional[StepCondition] = None  # Condition to execute this step
-    retry_strategy: Optional[Dict[str, Any]] = None  # Retry settings if step fails
+    # Retry settings if step fails
+    retry_strategy: Optional[Dict[str, Any]] = None
     timeout_seconds: int = 60  # Maximum time allowed for step execution
     on_failure: str = "abort"  # abort, continue, or retry
-    
+
     def should_execute(self, variables: Dict[str, Any]) -> bool:
         """Check if step should execute based on its condition"""
         if not self.condition:
@@ -83,7 +85,7 @@ class Step(BaseModel):
 
 
 class Scenario(BaseModel):
-    id: Optional[str] = None
+    id: Optional[str] = str(uuid.uuid4())
     nom: str
     description: Optional[str] = ""
     priorite: Priority = Priority.MOYENNE
@@ -100,7 +102,7 @@ class RunStatus(Enum):
 
 
 class Automatisation(BaseModel):
-    id: Optional[str]
+    id: Optional[str] = str(uuid.uuid4())
     scenario_id: str
     agent_config: Dict[str, Any]
     date_execution: Optional[datetime] = None

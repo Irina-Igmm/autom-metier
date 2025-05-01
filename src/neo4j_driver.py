@@ -3,6 +3,7 @@
 Module pour la gestion des connexions et requêtes Neo4j.
 Fournit une interface robuste et fiable pour interagir avec la base de données graphe.
 """
+import json
 import logging
 import uuid
 from abc import ABC, abstractmethod
@@ -126,6 +127,10 @@ class Neo4jDriver(IDriver):
         Exécute la requête et retourne la liste complète des enregistrements
         (chaque record.data()) avant de fermer la session.
         """
+        # Ensure driver is connected
+        if self.driver is None:
+            self.connect()
+
         params = params or {}
         try:
             with self.driver.session() as session:
@@ -184,8 +189,10 @@ class Neo4jDriver(IDriver):
         node_id = props.get('id', str(uuid.uuid4()))
         props_with_id = {**props, 'id': node_id}
         cypher = f"CREATE (n:{label} $props) RETURN n.id AS id"
-        record = self._run_tx(cypher, {'props': props_with_id}).single()
-        return record['id']
+        records = self._run_tx(cypher, {'props': props_with_id})
+        if not records:
+            raise RuntimeError(f"Échec de la création du nœud {label}")
+        return records[0]['id']
 
     def create_scenario(
         self,
@@ -206,13 +213,17 @@ class Neo4jDriver(IDriver):
             "statut: 'actif', priorite: $prio, etapes: $etapes})"
             " RETURN s.id AS id"
         )
-        record = self._run_tx(cypher, {
+        # fetch list of records
+        records = self._run_tx(cypher, {
             "id": scenario_id,
             "nom": nom,
             "desc": description,
             "prio": priorite,
             "etapes": steps,
-        }).single()
+        })
+        if not records:
+            raise RuntimeError("Échec de la création du scénario")
+        record = records[0]
         for d in doc_ids:
             self.link_scenario_to_document(scenario_id, d)
         for var in vars_:
@@ -264,7 +275,7 @@ class Neo4jDriver(IDriver):
             "value": variable_valeur,
             "method": methode,
             "conf": confiance,
-        }).single()
+        })[0]
         return record["id"]
 
     def start_automation(self, scenario_id: str, agent_config: Dict[str, Any]) -> str:
@@ -272,12 +283,19 @@ class Neo4jDriver(IDriver):
         cypher = (
             "MATCH (s:Scenario {id: $sid}) "
             "CREATE (a:Automatisation {"
-            "id: $aid, dateExecution: datetime(), statut: 'queued', resultat: null, duree: 0, agent_config: $cfg})"
+            "id: $aid, dateExecution: datetime(), statut: 'queued', resultat: null, "
+            "duree: 0, agent_config: $cfg})"
             "CREATE (a)-[:TRIGGERS]->(s) RETURN a.id AS id"
         )
-        record = self._run_tx(
-            cypher, {"sid": scenario_id, "aid": automation_id, "cfg": agent_config}).single()
-        return record["id"]
+        # serialize the config to a JSON string
+        cfg_str = json.dumps(agent_config)
+        records = self._run_tx(
+            cypher,
+            {"sid": scenario_id, "aid": automation_id, "cfg": cfg_str}
+        )
+        if not records:
+            raise RuntimeError("Échec du démarrage de l'automatisation")
+        return records[0]['id']
 
     def update_automation_status(
         self, automation_id: str, statut: str,
@@ -296,6 +314,21 @@ class Neo4jDriver(IDriver):
             params["dur"] = duree_ms
         self._run_tx(cypher, params)
 
+    def update_scenario(
+        self, scenario_id: str, statut: str, resultat: Optional[str] = None
+    ) -> None:
+        """Met à jour le statut et le résultat d'un scénario existant"""
+        # Optionally map human-readable statuses to internal values
+        statut_map = {"en cours": "running",
+                      "terminé": "success", "échoué": "error"}
+        mapped_statut = statut_map.get(statut, statut)
+        cypher = "MATCH (s:Scenario {id: $id}) SET s.statut = $stat"
+        params = {"id": scenario_id, "stat": mapped_statut}
+        if resultat is not None:
+            cypher += ", s.resultat = $res"
+            params["res"] = resultat
+        self._run_tx(cypher, params)
+
     def get_scenario_with_relations(self, scenario_id: str) -> Dict[str, Any]:
         cypher = (
             "MATCH (s:Scenario {id: $id})"
@@ -303,7 +336,10 @@ class Neo4jDriver(IDriver):
             " OPTIONAL MATCH (s)-[r2:USES_VARIABLE]->(v:Variable)"
             " RETURN s AS scenario, collect(distinct d) AS documents, collect(distinct v) AS variables"
         )
-        record = self._run_tx(cypher, {"id": scenario_id}).single()
+        records = self._run_tx(cypher, {"id": scenario_id})
+        if not records:
+            return {}
+        record = records[0]
         if not record:
             return {}
         return {
@@ -314,7 +350,10 @@ class Neo4jDriver(IDriver):
 
     def get_document(self, document_id: str) -> Dict[str, Any]:
         cypher = "MATCH (d:Document {id: $id}) RETURN d"
-        record = self._run_tx(cypher, {"id": document_id}).single()
+        records = self._run_tx(cypher, {"id": document_id})
+        if not records:
+            return {}
+        record = records[0]
         if not record:
             return {}
         return dict(record["d"])
@@ -332,8 +371,33 @@ class Neo4jDriver(IDriver):
             cypher += " AND d.id <> $did"
             params["did"] = document_id
         cypher += " RETURN count(d) > 0 AS dup"
-        result = self._run_tx(cypher, params).single()
-        return bool(result["dup"])
+        records = self._run_tx(cypher, params)
+        if not records:
+            return False
+        return bool(records[0]["dup"])
+
+    def update_scenario_etapes(self, scenario_id: str, etapes: List[Dict[str, Any]]) -> None:
+        """
+        Mets à jour la propriété `etapes` (JSON) du nœud Scenario.s
+        """
+        cypher = "MATCH (s:Scenario {id: $sid}) SET s.etapes = $etapes"
+        self._run_tx(cypher, {"sid": scenario_id, "etapes": etapes})
+
+    def link_nodes(self, from_lbl, from_id, rel, to_lbl, to_id, rel_props=None):
+        """
+        Méthode générique pour relier deux nœuds.
+        """
+        rp = ""
+        params = {"from_id": from_id, "to_id": to_id}
+        if rel_props:
+            kv = ", ".join([f"{k}: ${k}" for k in rel_props])
+            rp = f" {{ {kv} }}"
+            params.update(rel_props)
+        cypher = (
+            f"MATCH (a:{from_lbl} {{id: $from_id}}), (b:{to_lbl} {{id: $to_id}}) "
+            f"MERGE (a)-[r:{rel}{rp}]->(b)"
+        )
+        self._run_tx(cypher, params)
 
     def delete_entity(self, label: str, entity_id: str) -> None:
         cypher = (
@@ -352,8 +416,8 @@ class Neo4jDriver(IDriver):
 
     def health_check(self) -> bool:
         try:
-            self._run_tx("RETURN 1").single()
-            return True
+            records = self._run_tx("RETURN 1 AS ok")
+            return bool(records and records[0].get("ok") == 1)
         except Exception:
             return False
 
