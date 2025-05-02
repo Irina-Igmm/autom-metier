@@ -9,11 +9,12 @@ import traceback
 from datetime import datetime
 from typing import Any, Dict, List
 from pathlib import Path
-import inspect
+import base64
 
-from langchain.agents import create_react_agent, Tool, AgentExecutor
-from langchain_core.prompts import PromptTemplate
+from langchain.agents import create_react_agent, AgentExecutor
+from langchain.tools import StructuredTool
 from langchain_groq import ChatGroq
+from pydantic import BaseModel
 
 # Import tools from the tools module
 from src.tools.tools import (
@@ -25,10 +26,10 @@ from src.tools.tools import (
     submit_form,
     generate_pdf,
     save_generated_result,
+    create_variable,
     link_variable_to_document as link_variable_to_document_fn,
     link_scenario_to_variable as link_scenario_to_variable_fn
 )
-from scripts.minio_manager import MinioManager
 from src.neo4j_driver import Neo4jDriver
 from src.config import Config as settings
 
@@ -39,23 +40,86 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Modèles Pydantic pour les entrées des outils
 
-# helper to wrap tool functions and normalize inputs middleware
-def _wrap_tool_input(fn):
-    sig = inspect.signature(fn)
-    def wrapped(*args, **kwargs):
-        # 1) Unpack common keys
-        for key in ("parameters", "tool_input", "action_input"):
-            if key in kwargs and isinstance(kwargs[key], dict):
-                return fn(**kwargs.pop(key))
-        # 2) Unpack positional list
-        if "args" in kwargs and isinstance(kwargs["args"], list):
-            return fn(*kwargs.pop("args"))
-        # 3) Single kw → positional
-        if len(kwargs)==1 and len(sig.parameters)==1:
-            return fn(*kwargs.values())
-        return fn(*args, **kwargs)
-    return wrapped
+
+class ExtractVariablesInput(BaseModel):
+    content: str
+
+
+class S3UploadInput(BaseModel):
+    content: str  # base64 encodé
+    filename: str
+    content_type: str
+
+
+class SaveGeneratedResultInput(BaseModel):
+    content: str  # base64 encodé
+    filename: str
+    titre: str
+    automatisation_id: str
+    scenario_id: str
+    content_type: str = "application/octet-stream"
+    type_resultat: str = "document"
+    variables_utilisees: list[str] = None
+    metadonnees: dict[str, Any] = None
+
+
+class RunCypherInput(BaseModel):
+    query: str
+    params: dict[str, Any] = None
+
+
+class GenerateEmailInput(BaseModel):
+    template: str
+    variables: dict[str, Any]
+
+
+class FillTemplateInput(BaseModel):
+    template: str
+    variables: dict[str, Any]
+
+
+class SubmitWebFormInput(BaseModel):
+    url: str
+    data: dict[str, Any]
+    timeout: int = settings.WEB_TIMEOUT
+
+
+class GeneratePdfInput(BaseModel):
+    html: str
+
+
+class LinkVariableToDocumentInput(BaseModel):
+    document_id: str
+    variable_id: str
+
+
+class LinkScenarioToVariableInput(BaseModel):
+    scenario_id: str
+    variable_id: str
+
+
+class CreateVariableInput(BaseModel):
+    nom: str
+    valeur: str
+
+# Fonctions wrapper pour les outils avec des paramètres bytes
+
+
+# def tool_extract_variables(content_b64: str, filename: str) -> dict[str, Any]:
+#     content_bytes = base64.b64decode(content_b64)
+#     return extract_variables(content_bytes, filename)
+
+
+def tool_s3_upload(content_b64: str, filename: str, content_type: str) -> dict[str, Any]:
+    content_bytes = base64.b64decode(content_b64)
+    return s3_upload(content_bytes, filename, content_type)
+
+
+def tool_save_generated_result(content_b64: str, filename: str, titre: str, automatisation_id: str, scenario_id: str, content_type: str = "application/octet-stream", type_resultat: str = "document", variables_utilisees: list[str] = None, metadonnees: dict[str, any] = None) -> dict[str, str]:
+    content_bytes = base64.b64decode(content_b64)
+    return save_generated_result(content_bytes, filename, titre, automatisation_id, scenario_id, content_type, type_resultat, variables_utilisees, metadonnees)
 
 
 class AutomationAgent:
@@ -73,48 +137,22 @@ class AutomationAgent:
         # Load prompt from external markdown
         action_plan_md = Path(__file__).parent / 'data' / 'action_planning.md'
 
-        try:
-            action_planning_template = action_plan_md.read_text()
+        action_planning_template = action_plan_md.read_text()
 
-            # Modification ici - utiliser ChatPromptTemplate au lieu de PromptTemplate
-            from langchain_core.prompts import (
-                ChatPromptTemplate,
-                SystemMessagePromptTemplate,
-                HumanMessagePromptTemplate,
-                MessagesPlaceholder,
-            )
+        # Créer un prompt de chat plus approprié
+        from langchain_core.prompts import ChatPromptTemplate
 
-            # Créer un prompt de chat plus approprié
-            self.prompt = ChatPromptTemplate.from_messages([
-                ("system", action_planning_template),
-                ("human", "{input}"),
-                ("ai", "{agent_scratchpad}"),
-            ])
-            # Create the agent with the updated prompt
-            agent = create_react_agent(
-                llm=self.llm,
-                tools=self.tools,
-                prompt=self.prompt
-            )
-
-        except Exception as e:
-            logger.error(
-                f"Error initializing agent prompt: {e}", exc_info=True)
-            # Fallback to a simpler prompt
-            from langchain_core.prompts import ChatPromptTemplate
-
-            self.prompt = ChatPromptTemplate.from_messages([
-                SystemMessagePromptTemplate.from_template(
-                    action_planning_template),
-                HumanMessagePromptTemplate.from_template("{input}"),
-                # sera une List[BaseMessage]
-                MessagesPlaceholder(variable_name="agent_scratchpad"),
-            ])
-            agent = create_react_agent(
-                llm=self.llm,
-                tools=self.tools,
-                prompt=self.prompt
-            )
+        self.prompt = ChatPromptTemplate.from_messages([
+            ("system", action_planning_template),
+            ("human", "{input}"),
+            ("ai", "{agent_scratchpad}"),
+        ])
+        # Create the agent with the updated prompt
+        agent = create_react_agent(
+            llm=self.llm,
+            tools=self.tools,
+            prompt=self.prompt,
+        )
 
         # Initialize the agent executor with better error handling
         self.agent_executor = AgentExecutor.from_agent_and_tools(
@@ -125,34 +163,77 @@ class AutomationAgent:
             max_iterations=10
         )
 
-    def _create_tools(self) -> List[Tool]:
+    def _create_tools(self) -> list[StructuredTool]:
         """
         Create and return the list of tools available to the agent
         """
-        # wrap each function to normalize agent inputs
         return [
-            Tool(name="s3_upload", func=_wrap_tool_input(s3_upload),
-                 description="Upload un objet dans MinIO"),
-            # Tool(name="s3_download", func=_wrap_tool_input(s3_download),
-            #      description="Télécharger un objet depuis MinIO"),
-            Tool(name="run_cypher", func=_wrap_tool_input(run_cypher),
-                 description="Exécuter une requête Cypher sur Neo4j"),
-            Tool(name="extract_variables", func=_wrap_tool_input(extract_variables),
-                 description="Extraire des variables d'un document"),
-            Tool(name="generate_email", func=_wrap_tool_input(self.generate_email_tool),
-                 description="Générer un email via template"),
-            Tool(name="fill_template", func=_wrap_tool_input(self.fill_template_tool),
-                 description="Remplir un template HTML"),
-            Tool(name="submit_web_form", func=_wrap_tool_input(submit_form),
-                 description="Soumission de formulaire web"),
-            Tool(name="generate_pdf", func=_wrap_tool_input(generate_pdf),
-                 description="Générer un PDF à partir de HTML"),
-            Tool(name="save_generated_result", func=_wrap_tool_input(self.save_generated_result_tool),
-                 description="Sauvegarder un résultat généré (document, PDF, etc.) dans MinIO et Neo4j"),
-            Tool(name="link_variable_to_document", func=_wrap_tool_input(self.link_variable_to_document_tool),
-                 description="Lier une variable existante à un document Neo4j"),
-            Tool(name="link_scenario_to_variable", func=_wrap_tool_input(self.link_scenario_to_variable_tool),
-                 description="Lier une variable existante à un scénario Neo4j"),
+            StructuredTool.from_function(
+                func=extract_variables,
+                name="extract_variables",
+                description="Extraire des variables d'un document. Paramètres: content (str)",
+                args_schema=ExtractVariablesInput,
+            ),
+            StructuredTool.from_function(
+                func=tool_s3_upload,
+                name="s3_upload",
+                description="Upload un objet dans MinIO. Paramètres: content (str, base64 encoded), filename (str), content_type (str)",
+                args_schema=S3UploadInput,
+            ),
+            StructuredTool.from_function(
+                func=run_cypher,
+                name="run_cypher",
+                description="Exécuter une requête Cypher sur Neo4j. Paramètres: query (str), params (dict, optional)",
+                args_schema=RunCypherInput,
+            ),
+            StructuredTool.from_function(
+                func=self.generate_email_tool,
+                name="generate_email",
+                description="Générer un email via template. Paramètres: template (str), variables (dict)",
+                args_schema=GenerateEmailInput,
+            ),
+            StructuredTool.from_function(
+                func=self.fill_template_tool,
+                name="fill_template",
+                description="Remplir un template HTML. Paramètres: template (str), variables (dict)",
+                args_schema=FillTemplateInput,
+            ),
+            StructuredTool.from_function(
+                func=submit_form,
+                name="submit_web_form",
+                description="Soumission de formulaire web. Paramètres: url (str), data (dict), timeout (int, optional)",
+                args_schema=SubmitWebFormInput,
+            ),
+            StructuredTool.from_function(
+                func=generate_pdf,
+                name="generate_pdf",
+                description="Générer un PDF à partir de HTML. Paramètres: html (str)",
+                args_schema=GeneratePdfInput,
+            ),
+            StructuredTool.from_function(
+                func=tool_save_generated_result,
+                name="save_generated_result",
+                description="Sauvegarder un résultat généré dans MinIO et Neo4j. Paramètres: content (str, base64 encoded), filename (str), titre (str), automatisation_id (str), scenario_id (str), content_type (str, optional), type_resultat (str, optional), variables_utilisees (list of str, optional), metadonnees (dict, optional)",
+                args_schema=SaveGeneratedResultInput,
+            ),
+            StructuredTool.from_function(
+                func=self.link_variable_to_document_tool,
+                name="link_variable_to_document",
+                description="Lier une variable existante à un document Neo4j. Paramètres: document_id (str), variable_id (str)",
+                args_schema=LinkVariableToDocumentInput,
+            ),
+            StructuredTool.from_function(
+                func=self.link_scenario_to_variable_tool,
+                name="link_scenario_to_variable",
+                description="Lier une variable existante à un scénario Neo4j. Paramètres: scenario_id (str), variable_id (str)",
+                args_schema=LinkScenarioToVariableInput,
+            ),
+            StructuredTool.from_function(
+                func=create_variable,
+                name="create_variable",
+                description="Crée une variable dans Neo4j. Paramètres: nom (str), valeur (str). Retourne l'ID de la variable créée.",
+                args_schema=CreateVariableInput,
+            ),
         ]
 
     # Simple wrapper methods to maintain API compatibility
@@ -240,20 +321,24 @@ class AutomationAgent:
                 document = documents[0]
                 agent_input["document_id"] = document.get("id")
                 agent_input["document_type"] = document.get("type")
-                
 
                 # Try to download document content
                 try:
                     file_content = s3_download(document.get("minio_key"))
-                    agent_input["file_content"] = file_content.decode(
-                        "utf-8", errors="ignore")
+                    agent_input["content"] = file_content.decode('utf-8')
                     agent_input["filename"] = document.get("minio_key")
                 except Exception as e:
                     logger.error(f"Error downloading document: {e}")
 
             agent_input["input"] = f"Execute scenario {scenario_id} with automation_id {automation_id}"
+
+            logging.info(
+                f"Agent input: {json.dumps(agent_input, indent=2)}")
+
             # Execute the agent
+            logger.info(f"Agent input: {json.dumps(agent_input, indent=2)}")
             result = self.agent_executor.invoke(agent_input)
+            logger.info(f"Agent result: {json.dumps(result, indent=2)}")
 
             # Update automation status
             drv.update_automation_status(
