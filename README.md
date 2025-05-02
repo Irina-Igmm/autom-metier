@@ -50,15 +50,35 @@ L’automatisation repose sur un agent IA multi-outils : chaque tâche d’un 
 - **Traçabilité** : chaque étape est enregistrée dans Neo4j
 
 ## Lancement local
-1. Cloner le dépôt
-2. Copier `.env.example` en `.env` et adapter les variables
-3. Démarrer l'infra :
+1. Cloner le dépôt :
    ```bash
-   docker-compose -f infra/docker-compose.yml up --build
+   git clone <repo-url>
+   cd automatisation-metier
    ```
-4. Lancer l'API :
+2. Copier et adapter la configuration :
    ```bash
-   uvicorn main:app --reload
+   cp .env.example .env
+   ```
+   Renseigner les variables (Neo4j URI/credentials, MinIO credentials, LLM_API_KEY, etc.).
+3. (Optionnel) Initialiser Neo4j (si nécessaire) :
+   ```bash
+   docker-compose -f infra/docker-compose.yml run --rm fastapi python scripts/init_neo4j.py
+   ```
+4. Démarrer tous les services en arrière-plan :
+   ```bash
+   docker-compose -f infra/docker-compose.yml up -d --build
+   ```
+5. Vérifier les services :
+   ```bash
+   docker-compose -f infra/docker-compose.yml ps
+   ```
+6. Accéder :
+   - API FastAPI : http://localhost:8000 (docs à http://localhost:8000/docs)
+   - Neo4j : http://localhost:7474 (login: neo4j / test2025*7)
+   - MinIO Console : http://localhost:9001 (login: adminminio2025 / SuperSecretKey2025)
+7. Suivre les logs (facultatif) :
+   ```bash
+   docker-compose -f infra/docker-compose.yml logs -f
    ```
 
 ## Lancement sur Google Colab

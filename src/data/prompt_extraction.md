@@ -7,6 +7,12 @@ First, identify the document type based on the content (invoice, contract, email
 Extract data according to the document type:
 
 ## FOR INVOICES
+- Invoice Number
+- Bank Account
+- Date  (YYYY-MM-DD)
+- Bill To
+- Payment Terms
+- Due Date  (YYYY-MM-DD)
 - date_document (YYYY-MM-DD)
 - numero_facture
 - nom_entreprise (company issuing the invoice)
@@ -46,7 +52,7 @@ Extract data according to the document type:
 - conclusions
 - recommendations
 
-Ensure the output is strictly JSON, without Markdown or code fences. If a field is missing or not applicable, simply omit it from the JSON. If no variables are found at all, return {}.
+Ensure the output is strictly JSON, without Markdown or code fences. If a field is missing or not applicable, simply omit it from the JSON. If no variables are found at all, return {{}}.
 
 Document text:
 {text}

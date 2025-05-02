@@ -13,14 +13,14 @@ Le choix des modèles de langage (LLM) repose sur les critères suivants :
 ## 2. Modèles retenus et paramètres
 
 ### Extraction de variables
-- **Modèle** : Llama-2-70B
+- **Modèle** : meta-llama/llama-4-scout-17b-16e-instruct
 - **Fournisseur** : Groq Cloud
-- **Version** : 70B
+- **Version** : 17b
 - **Endpoint** : https://api.groq.com/openai/v1/chat/completions
 - **Clé API** : fournie via la variable d’environnement `LLM_API_KEY`
 - **Paramètres d’appel** :
-  - `model`: "llama2-70b-4096"
-  - `temperature`: 0.2 (pour extraction fiable)
+  - `model`: "meta-llama/llama-4-scout-17b-16e-instruct"
+  - `temperature`: 0.0 (pour extraction fiable)
   - `max_tokens`: 1024
 - **Justification** :
   - Excellente compréhension du texte métier et des instructions complexes

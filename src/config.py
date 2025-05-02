@@ -38,10 +38,12 @@ class Config:
     # Configuration LLM/IA
     LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq")
     LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-    LLM_MODEL = os.getenv("LLM_MODEL", "llama3-8b-8192")
+    LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
     LLM_EXTRACTION = os.getenv(
         "LLM_EXTRACTION", "meta-llama/llama-4-scout-17b-16e-instruct")
     LLM_GENARATION = os.getenv("LLM_GENARATION", "mixtral-8x7b-32768")
+
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
     # Configuration générale
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

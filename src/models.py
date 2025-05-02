@@ -19,12 +19,12 @@ class Priority(Enum):
 
 
 class Document(BaseModel):
-    id: Optional[str] = str(uuid.uuid4())
+    id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
     titre: str
     type: str
     minio_key: str
     statut: Status = Status.ACTIF
-    date_creation: datetime = Field(default_factory=datetime.utcnow)
+    date_creation: datetime = Field(default_factory=datetime.now)
 
 
 class VariableType(str, Enum):
@@ -42,7 +42,7 @@ class DataType(Enum):
 
 
 class Variable(BaseModel):
-    id: Optional[str] = str(uuid.uuid4())
+    id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
     key: str
     value: Optional[Any] = None
     data_type: VariableType = VariableType.TEXT
@@ -111,13 +111,13 @@ class Etape(BaseModel):
 
 
 class Scenario(BaseModel):
-    id: Optional[str] = str(uuid.uuid4())
+    id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
     nom: str
     description: Optional[str] = ""
     priorite: Priority = Priority.MEDIUM
-    documents: List[str] = []
-    variables: List[Variable] = [] 
-    etapes: List[Etape] = []
+    documents: List[str] = Field(default_factory=list)
+    variables: List[Variable] = Field(default_factory=list)
+    etapes: List[Etape] = Field(default_factory=list)
 
 
 class RunStatus(Enum):
@@ -128,7 +128,7 @@ class RunStatus(Enum):
 
 
 class Automatisation(BaseModel):
-    id: Optional[str] = str(uuid.uuid4())
+    id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
     scenario_id: str
     agent_config: Dict[str, Any]
     date_execution: Optional[datetime] = None
@@ -140,12 +140,12 @@ class Automatisation(BaseModel):
 # Nouveau modèle pour les résultats générés
 class ResultatGenere(BaseModel):
     """Modèle pour représenter un résultat généré par une automatisation"""
-    id: Optional[str] = None
+    id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
     automatisation_id: str
     scenario_id: str
     type: str = "document"  # document, email, pdf, etc.
     titre: str
     minio_key: Optional[str] = None  # Référence au fichier dans MinIO
-    variables_utilisees: List[str] = []  # Liste des IDs de variables utilisées
+    variables_utilisees: List[str] = Field(default_factory=list)  # Liste des IDs de variables utilisées
     date_creation: Optional[datetime] = Field(default_factory=datetime.utcnow)
     metadonnees: Optional[Dict[str, Any]] = Field(default_factory=dict)

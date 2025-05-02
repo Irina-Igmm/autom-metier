@@ -1,5 +1,6 @@
 import base64
-from typing import Any, List, Dict
+from datetime import datetime
+from typing import Any, List, Dict, Union
 from PyPDF2 import PdfReader
 from jinja2 import Template
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -159,20 +160,45 @@ def s3_download(filename: str) -> bytes:
         logger.error(f"S3 download error: {e}")
         raise
 
+def check_date_proximity(date_debut: str, date_fin: str) -> bool:
+    debut = datetime.fromisoformat(date_debut)
+    fin = datetime.fromisoformat(date_fin)
+    return (fin - debut).days <= 30
+
 # --- Neo4j Cypher tools ---
 
 
 def run_cypher(query: str, params: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-    """Run a Cypher query on Neo4j"""
+    """
+    Run a Cypher query on Neo4j. Accepts:
+    - raw Cypher string with optional params
+    - dict or JSON string payload {"query":..., "params":...}
+    """
+    query_str = None
+    params_dict = params or {}
+    # Handle payload as dict or JSON string
+    if isinstance(query, dict):
+        query_str = query.get("query")
+        params_dict = query.get("params", {})
+    elif isinstance(query, str) and query.strip().startswith("{"):
+        try:
+            payload = json.loads(query)
+            query_str = payload.get("query")
+            params_dict = payload.get("params", {})
+        except Exception:
+            logger.warning("run_cypher payload parsing failed, using raw query")
+            query_str = query
+    else:
+        query_str = query
     try:
         drv = Neo4jDriver(
             uri=settings.get_neo4j_uri(),
             user=settings.NEO4J_USER,
             password=settings.NEO4J_PASSWORD
         )
-        results = drv._run_tx(query, params or {})
+        results = drv._run_tx(query_str, params_dict)
         drv.close()
-        return results  # déjà list[dict] dans _run_tx
+        return results
     except Exception as e:
         logger.error(f"Cypher query error: {e}")
         return [{"error": str(e)}]

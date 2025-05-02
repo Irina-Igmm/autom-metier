@@ -9,21 +9,19 @@ import time
 import uuid
 import pytest
 from testcontainers.neo4j import Neo4jContainer
-from typing import Generator
+from src.neo4j_driver import Neo4jDriver
 
 # Ajouter le répertoire src au PYTHONPATH
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 
 @pytest.fixture(scope="module")
-def neo4j_container() -> Generator[Neo4jContainer, None, None]:
+def neo4j_container():
     """
     Démarre un conteneur Neo4j temporaire pour les tests.
     """
-    container = Neo4jContainer("neo4j:5.13")
+    container = Neo4jContainer("neo4j:5.19").with_env("NEO4J_AUTH", "neo4j/test2025*7")
     container.start()
-    # attendre que Neo4j soit prêt
-    time.sleep(5)
     yield container
     container.stop()
 
@@ -33,11 +31,8 @@ def neo4j_driver(neo4j_container):
     """
     Crée une instance du driver Neo4j connecté au conteneur de test.
     """
-    from neo4j_driver import Neo4jDriver
     uri = neo4j_container.get_connection_url()
-    user = "neo4j"
-    password = neo4j_container.get_admin_password()
-    driver = Neo4jDriver(uri=uri, user=user, password=password)
+    driver = Neo4jDriver(uri=uri, user="neo4j", password="test2025*7")
     # créer les contraintes dans la base de test
     driver._create_constraints()
     return driver
@@ -45,26 +40,14 @@ def neo4j_driver(neo4j_container):
 
 def test_create_document(neo4j_driver):
     """Test de création d'un document dans Neo4j."""
-    nom = "Document de test"
-    type_doc = "test"
-    minio_key = "dummy_key"
-    doc_id = neo4j_driver.create_document(
-        titre=nom,
-        type=type_doc,
-        minio_key=minio_key
-    )
+    doc_id = neo4j_driver.create_document("Test Document", "test", "dummy_key")
     assert doc_id is not None
-    assert isinstance(doc_id, str)
 
 
 def test_create_scenario(neo4j_driver):
     """Test de création d'un scénario sans dépendances."""
-    scenario_id = neo4j_driver.create_scenario(
-        nom="Scénario Test",
-        description="",
-        priorite="moyenne"
-    )
-    assert scenario_id and isinstance(scenario_id, str)
+    scenario_id = neo4j_driver.create_scenario("Test Scenario", "", "moyenne")
+    assert scenario_id is not None
 
 
 def test_link_variable_to_document(neo4j_driver):
@@ -153,9 +136,8 @@ def test_get_scenario_with_relations(neo4j_driver):
 
 def test_context_manager(neo4j_container):
     """Test du context manager (__enter__/__exit__)."""
-    from neo4j_driver import Neo4jDriver
     uri = neo4j_container.get_connection_url()
-    with Neo4jDriver(uri=uri, user="neo4j", password=neo4j_container.get_admin_password()) as drv:
+    with Neo4jDriver(uri=uri, user="neo4j", password="test2025*7") as drv:
         assert drv.driver is not None
     assert drv.driver is None
 

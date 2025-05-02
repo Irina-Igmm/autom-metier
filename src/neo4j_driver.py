@@ -27,7 +27,7 @@ class IDriver(ABC):
         pass
 
     @abstractmethod
-    def link_variable_to_document(
+    def create_and_link_variable_to_document(
         self, document_id: str, variable_nom: str, variable_valeur: Any,
         variable_type: str, methode: str, confiance: float
     ) -> str:
@@ -257,7 +257,7 @@ class Neo4jDriver(IDriver):
         self._run_tx(cypher, {"sid": scenario_id, "vid": var_id,
                      "key": key, "dt": data_type, "role": role})
 
-    def link_variable_to_document(
+    def create_and_link_variable_to_document(
         self, document_id: str, variable_nom: str, variable_valeur: Any,
         variable_type: str = "string", methode: str = "IA", confiance: float = 1.0
     ) -> str:
@@ -374,14 +374,14 @@ class Neo4jDriver(IDriver):
         return dict(record["d"])
 
     def check_duplicate_invoice(
-        self, num_facture: str, fournisseur: str, document_id: Optional[str] = None
+        self, numero_facture: str, document_id: Optional[str] = None
     ) -> bool:
+        """Vérifie si une facture existe déjà selon son numéro (optionnellement excluant un ID donné)."""
         cypher = (
-            "MATCH (d:Document {type: 'facture'})"
-            " WHERE EXISTS((d)-[:HAS_VARIABLE]->(:Variable {key: 'numeroFacture', value: $num}))"
-            "   AND EXISTS((d)-[:HAS_VARIABLE]->(:Variable {key: 'fournisseur', value: $fou}))"
+            "MATCH (d:Document {type: 'facture'}) "
+            "WHERE EXISTS((d)-[:HAS_VARIABLE]->(:Variable {key: 'numero_facture', value: $num}))"
         )
-        params: Dict[str, Any] = {"num": num_facture, "fou": fournisseur}
+        params: Dict[str, Any] = {"num": numero_facture}
         if document_id:
             cypher += " AND d.id <> $did"
             params["did"] = document_id

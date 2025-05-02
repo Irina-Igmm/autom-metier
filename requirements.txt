@@ -13,6 +13,7 @@ pytest
 # Pour l'agent IA, adapter selon le provider (Groq, OpenAI, etc.)
 groq
 langchain-groq
+langchain-openai
 # Pour la gestion des fichiers et des données
 playwright
 # Pour le templating HTML
